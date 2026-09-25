@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 void main() => runApp(const HifzAIApp());
 
@@ -20,6 +21,16 @@ class AppInfo {
   static const supportEmail = 'hifzalbusinesss@gmail.com';
   static const appName = 'HifzAI';
   static const packageId = 'com.hifzai.quran';
+  static const monthlyPrice = 'R200';
+  static const yearlyPrice = 'R1500';
+}
+
+class AppLanguage {
+  static final arabic = ValueNotifier<bool>(false);
+
+  static String t(String english, String arabicText) {
+    return arabic.value ? arabicText : english;
+  }
 }
 
 TextStyle serif(double size, {FontWeight w = FontWeight.w500, Color? color, double? spacing}) {
@@ -96,6 +107,28 @@ class QuranService {
         text: item['text'] as String,
       );
     }).toList(growable: false);
+  }
+}
+
+class PaymentService {
+  static const apiBaseUrl = String.fromEnvironment(
+    'PAYMENTS_API_BASE_URL',
+    defaultValue: 'http://localhost:3000',
+  );
+
+  static Future<Uri> createCheckout(String plan) async {
+    final response = await http.post(
+      Uri.parse('$apiBaseUrl/create-checkout'),
+      headers: const {'Content-Type': 'application/json'},
+      body: jsonEncode({'plan': plan}),
+    );
+    if (response.statusCode != 200) {
+      throw Exception('Payment service returned HTTP ${response.statusCode}.');
+    }
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    final redirectUrl = data['redirectUrl'] as String?;
+    if (redirectUrl == null) throw Exception('Payment service returned no checkout URL.');
+    return Uri.parse(redirectUrl);
   }
 }
 
@@ -302,7 +335,7 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
                 ),
                 const SizedBox(height: 10),
                 Text(
-                  'MEMORISE â€¢ RECITE â€¢ MASTER',
+                  'MEMORISE • RECITE • MASTER',
                   style: serif(13, color: C.goldLight, spacing: 4),
                 ),
               ],
@@ -334,7 +367,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     (
       icon: Icons.fact_check_rounded,
       title: 'Hifz Examination',
-      desc: 'Memorisation tests like a real examiner â€” â€œContinue from Ayah 12.â€ No mushaf, no hints.'
+      desc: 'Memorisation tests like a real examiner — “Continue from Ayah 12.” No mushaf, no hints.'
     ),
     (
       icon: Icons.workspace_premium_rounded,
@@ -386,35 +419,40 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                   final slide = slides[index];
                   return Padding(
                     padding: const EdgeInsets.all(32),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(28),
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            border: Border.all(color: C.gold.withOpacity(0.5), width: 2),
-                            color: C.emerald.withOpacity(0.5),
-                          ),
-                          child: Icon(slide.icon, size: 64, color: C.goldLight),
+                    child: SingleChildScrollView(
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(minHeight: 202),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.all(28),
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                border: Border.all(color: C.gold.withOpacity(0.5), width: 2),
+                                color: C.emerald.withOpacity(0.5),
+                              ),
+                              child: Icon(slide.icon, size: 64, color: C.goldLight),
+                            ),
+                            const SizedBox(height: 36),
+                            Text(
+                              slide.title,
+                              textAlign: TextAlign.center,
+                              style: serif(28, w: FontWeight.bold),
+                            ),
+                            const SizedBox(height: 16),
+                            Text(
+                              slide.desc,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: C.cream.withOpacity(0.75),
+                                fontSize: 16,
+                                height: 1.6,
+                              ),
+                            ),
+                          ],
                         ),
-                        const SizedBox(height: 36),
-                        Text(
-                          slide.title,
-                          textAlign: TextAlign.center,
-                          style: serif(28, w: FontWeight.bold),
-                        ),
-                        const SizedBox(height: 16),
-                        Text(
-                          slide.desc,
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            color: C.cream.withOpacity(0.75),
-                            fontSize: 16,
-                            height: 1.6,
-                          ),
-                        ),
-                      ],
+                      ),
                     ),
                   );
                 },
@@ -470,22 +508,25 @@ class _MainShellState extends State<MainShell> {
       const ProgressScreen(),
     ];
 
-    return Scaffold(
-      body: AnimatedSwitcher(
-        duration: const Duration(milliseconds: 350),
-        child: screens[tab],
-      ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: tab,
-        onDestinationSelected: (index) => setState(() => tab = index),
-        backgroundColor: C.emerald,
-        indicatorColor: C.gold.withOpacity(0.25),
-        destinations: const [
-          NavigationDestination(icon: Icon(Icons.home_rounded), label: 'Home'),
-          NavigationDestination(icon: Icon(Icons.fact_check_rounded), label: 'Examiner'),
-          NavigationDestination(icon: Icon(Icons.record_voice_over_rounded), label: 'Moulana'),
-          NavigationDestination(icon: Icon(Icons.insights_rounded), label: 'Progress'),
-        ],
+    return ValueListenableBuilder<bool>(
+      valueListenable: AppLanguage.arabic,
+      builder: (context, isArabic, _) => Scaffold(
+        body: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 350),
+          child: screens[tab],
+        ),
+        bottomNavigationBar: NavigationBar(
+          selectedIndex: tab,
+          onDestinationSelected: (index) => setState(() => tab = index),
+          backgroundColor: C.emerald,
+          indicatorColor: C.gold.withOpacity(0.25),
+          destinations: [
+            NavigationDestination(icon: const Icon(Icons.home_rounded), label: AppLanguage.t('Home', 'الرئيسية')),
+            NavigationDestination(icon: const Icon(Icons.fact_check_rounded), label: AppLanguage.t('Examiner', 'الاختبار')),
+            NavigationDestination(icon: const Icon(Icons.record_voice_over_rounded), label: AppLanguage.t('Moulana', 'المعلّم')),
+            NavigationDestination(icon: const Icon(Icons.insights_rounded), label: AppLanguage.t('Progress', 'التقدم')),
+          ],
+        ),
       ),
     );
   }
@@ -505,14 +546,23 @@ class HomeScreen extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('AssalÄmu Ê¿Alaykum', style: serif(30, w: FontWeight.bold)),
-                  Text('Read, learn and memorise â€” free for everyone.', style: TextStyle(color: C.goldLight.withOpacity(0.9))),
+                  Row(
+                    children: [
+                      Expanded(child: Text(AppLanguage.t('Assalamu ʿAlaykum', 'السلام عليكم'), style: serif(30, w: FontWeight.bold))),
+                      IconButton(
+                        tooltip: AppLanguage.t('العربية', 'English'),
+                        onPressed: () => AppLanguage.arabic.value = !AppLanguage.arabic.value,
+                        icon: const Icon(Icons.translate_rounded, color: C.goldLight),
+                      ),
+                    ],
+                  ),
+                  Text(AppLanguage.t('Read, learn and memorise — free for everyone.', 'اقرأ وتعلّم واحفظ — مجاناً للجميع.'), style: TextStyle(color: C.goldLight.withOpacity(0.9))),
                   const SizedBox(height: 18),
                   const AyahCard(),
                   const SizedBox(height: 18),
                   const FreeServiceBanner(),
                   const SizedBox(height: 22),
-                  Text('Choose a Surah', style: serif(21, w: FontWeight.w600)),
+                  Text(AppLanguage.t('Choose a Surah', 'اختر سورة'), style: serif(21, w: FontWeight.w600)),
                   const SizedBox(height: 12),
                 ],
               ),
@@ -604,7 +654,7 @@ class _AyahCardState extends State<AyahCard> with SingleTickerProviderStateMixin
             ),
             const SizedBox(height: 8),
             Text(
-              'â€œVerily, in the remembrance of Allah do hearts find rest.â€',
+              '“Verily, in the remembrance of Allah do hearts find rest.”',
               style: TextStyle(
                 fontSize: 12,
                 color: C.emeraldDark.withOpacity(0.8),
@@ -640,7 +690,7 @@ class FreeServiceBanner extends StatelessWidget {
           SizedBox(width: 14),
           Expanded(
             child: Text(
-              'Live Quran text â€¢ No account â€¢ No subscription',
+              'Live Quran text • No account • Core reading free',
               style: TextStyle(color: C.cream),
             ),
           ),
@@ -741,7 +791,7 @@ class _SurahScreenState extends State<SurahScreen> {
                           children: [
                             const Icon(Icons.cloud_off_rounded, color: C.goldLight, size: 48),
                             const SizedBox(height: 12),
-                            const Text(
+                            Text(
                               'The Quran text could not be loaded. Check your internet connection and try again.',
                               textAlign: TextAlign.center,
                               style: TextStyle(color: C.cream),
@@ -811,28 +861,39 @@ class ExaminerScreen extends StatelessWidget {
           const SizedBox(height: 20),
           const Icon(Icons.verified_user_rounded, size: 68, color: C.gold),
           const SizedBox(height: 12),
-          Center(child: Text('Hifz Examiner', style: serif(30, w: FontWeight.bold))),
+          Center(child: Text(AppLanguage.t('Hifz Examiner', 'اختبار الحفظ'), style: serif(30, w: FontWeight.bold))),
           const SizedBox(height: 10),
           Center(
             child: Text(
-              'The mushaf is hidden. Recite from memory â€” exactly like a real examination.',
+              AppLanguage.t(
+                'The mushaf is hidden. Recite from memory — exactly like a real examination.',
+                'المصحف مخفي. اقرأ من حفظك كما في الاختبار الحقيقي.',
+              ),
               textAlign: TextAlign.center,
               style: TextStyle(color: C.cream.withOpacity(0.8)),
             ),
           ),
           const SizedBox(height: 26),
-          _feature(Icons.menu_book_rounded, 'Read every Surah', 'Open any Surah from Home and read the complete live Quran text.'),
-          _feature(Icons.mic_none_rounded, 'Recitation checking', 'Audio analysis is being built next. This version does not invent scores or feedback.'),
-          _feature(Icons.public_rounded, 'Free for everyone', 'No account, subscription or payment is required to read and learn.'),
+          _feature(Icons.menu_book_rounded, AppLanguage.t('Read every Surah', 'اقرأ كل السور'), AppLanguage.t('Open any Surah from Home and read the complete live Quran text.', 'افتح أي سورة من الرئيسية واقرأ نص القرآن كاملاً.' )),
+          _feature(Icons.mic_none_rounded, AppLanguage.t('Recitation checking', 'فحص التلاوة'), AppLanguage.t('Audio analysis is being built next. This version does not invent scores or feedback.', 'سيتم إضافة تحليل الصوت لاحقاً. هذا الإصدار لا يخترع درجات أو ملاحظات.' )),
+          _feature(Icons.public_rounded, AppLanguage.t('Core reading is free', 'القراءة الأساسية مجانية'), AppLanguage.t('Read the Quran without an account. Optional plans will be connected to payments separately.', 'اقرأ القرآن بدون حساب. سيتم ربط الخطط الاختيارية بالدفع بشكل منفصل.' )),
           const SizedBox(height: 22),
           OutlinedButton.icon(
             icon: const Icon(Icons.home_rounded),
-            label: const Text('Choose a Surah from Home'),
+            label: Text(AppLanguage.t('Choose a Surah from Home', 'اختر سورة من الرئيسية')),
             onPressed: () => Navigator.of(context).maybePop(),
             style: OutlinedButton.styleFrom(
               foregroundColor: C.goldLight,
               minimumSize: const Size.fromHeight(54),
               side: const BorderSide(color: C.gold),
+            ),
+          ),
+          const SizedBox(height: 12),
+          GoldButton(
+            label: AppLanguage.t('Start a Memorisation Test', 'ابدأ اختبار الحفظ'),
+            icon: Icons.play_arrow_rounded,
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const MemorisationTestScreen()),
             ),
           ),
           const SizedBox(height: 20),
@@ -868,6 +929,173 @@ class ExaminerScreen extends StatelessWidget {
   }
 }
 
+class MemorisationTestScreen extends StatefulWidget {
+  const MemorisationTestScreen({super.key});
+
+  @override
+  State<MemorisationTestScreen> createState() => _MemorisationTestScreenState();
+}
+
+class _MemorisationTestScreenState extends State<MemorisationTestScreen> {
+  Surah selectedSurah = D.surahs.first;
+  Future<List<QuranAyah>>? ayahs;
+  int ayahIndex = 0;
+  bool answerVisible = false;
+  int correct = 0;
+  int needsRevision = 0;
+
+  void startTest() {
+    setState(() {
+      ayahs = QuranService.fetchSurah(selectedSurah.id);
+      ayahIndex = 0;
+      answerVisible = false;
+      correct = 0;
+      needsRevision = 0;
+    });
+  }
+
+  void mark(bool wasCorrect, List<QuranAyah> loadedAyahs) {
+    setState(() {
+      if (wasCorrect) {
+        correct++;
+      } else {
+        needsRevision++;
+      }
+      answerVisible = false;
+      if (ayahIndex < loadedAyahs.length - 1) {
+        ayahIndex++;
+      } else {
+        ayahs = null;
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final loaded = ayahs;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Memorisation Test'),
+        backgroundColor: C.emeraldDark,
+        foregroundColor: C.cream,
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(20),
+        children: [
+          Text('Test yourself', style: serif(28, w: FontWeight.bold)),
+          const SizedBox(height: 8),
+          Text(
+            'Choose a Surah, recite from memory, then reveal the ayah to check yourself.',
+            style: TextStyle(color: C.cream.withOpacity(0.75)),
+          ),
+          const SizedBox(height: 20),
+          DropdownButtonFormField<Surah>(
+            value: selectedSurah,
+            decoration: const InputDecoration(labelText: 'Surah'),
+            items: D.surahs
+                .map((surah) => DropdownMenuItem(value: surah, child: Text(surah.name)))
+                .toList(),
+            onChanged: (surah) {
+              if (surah != null) setState(() => selectedSurah = surah);
+            },
+          ),
+          const SizedBox(height: 14),
+          GoldButton(label: 'Load Test', icon: Icons.download_rounded, onPressed: startTest),
+          if (loaded != null) ...[
+            const SizedBox(height: 24),
+            FutureBuilder<List<QuranAyah>>(
+              future: loaded,
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator(color: C.gold));
+                }
+                if (snapshot.hasError) {
+                  return const Text(
+                    'The test could not be loaded. Check your connection and try again.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: C.cream),
+                  );
+                }
+                final items = snapshot.data ?? const <QuranAyah>[];
+                if (items.isEmpty || ayahIndex >= items.length) {
+                  return _result();
+                }
+                final ayah = items[ayahIndex];
+                return Column(
+                  children: [
+                    Text(
+                      'Ayah ${ayah.number} of ${items.length}',
+                      style: TextStyle(color: C.goldLight.withOpacity(0.9)),
+                    ),
+                    const SizedBox(height: 18),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(
+                        color: C.emerald.withOpacity(0.55),
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: answerVisible
+                          ? Text(
+                              ayah.text,
+                              textAlign: TextAlign.right,
+                              textDirection: TextDirection.rtl,
+                              style: const TextStyle(fontSize: 25, height: 2),
+                            )
+                          : const Text(
+                              'Recite this ayah from memory, then reveal the answer.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: C.cream, height: 1.5),
+                            ),
+                    ),
+                    const SizedBox(height: 14),
+                    if (!answerVisible)
+                      OutlinedButton.icon(
+                        onPressed: () => setState(() => answerVisible = true),
+                        icon: const Icon(Icons.visibility_rounded),
+                        label: const Text('Reveal Ayah'),
+                      )
+                    else
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton(
+                              onPressed: () => mark(false, items),
+                              child: const Text('Needs revision'),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: FilledButton(
+                              onPressed: () => mark(true, items),
+                              child: const Text('I remembered it'),
+                            ),
+                          ),
+                        ],
+                      ),
+                  ],
+                );
+              },
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _result() {
+    return Column(
+      children: [
+        const Icon(Icons.celebration_rounded, color: C.gold, size: 56),
+        const SizedBox(height: 10),
+        Text('Test complete', style: serif(24, w: FontWeight.bold)),
+        const SizedBox(height: 8),
+        Text('$correct remembered • $needsRevision to revise', style: const TextStyle(color: C.cream)),
+      ],
+    );
+  }
+}
+
 class MoulanaScreen extends StatefulWidget {
   const MoulanaScreen({super.key});
 
@@ -877,7 +1105,7 @@ class MoulanaScreen extends StatefulWidget {
 
 class _MoulanaScreenState extends State<MoulanaScreen> {
   final messages = <MapEntry<bool, String>>[
-    const MapEntry(false, 'AssalÄmu Ê¿Alaykum. This free Tajweed guide explains foundational concepts such as madd and ghunnah.'),
+    const MapEntry(false, 'Assalamu ʿAlaykum. This Tajweed guide explains foundational concepts such as madd and ghunnah.'),
   ];
   final controller = TextEditingController();
 
@@ -899,13 +1127,13 @@ class _MoulanaScreenState extends State<MoulanaScreen> {
   String _reply(String raw) {
     final text = raw.toLowerCase();
     if (text.contains('test')) {
-      return 'BismillÄh. Open the Examiner tab and begin â€” I will listen to every ayah.';
+      return 'Bismillah. Open the Examiner tab and begin — I will listen to every ayah.';
     }
     if (text.contains('ghunnah')) {
-      return 'Ghunnah is the nasalisation held for two counts on Ù† and Ù… with shaddah. Say with me: Ø¥Ù†ÙŽÙ‘.';
+      return 'Ghunnah is the nasalisation held for two counts on ن and م with shaddah. Say with me: إِنَّ.';
     }
     if (text.contains('madd')) {
-      return 'Madd is elongation. A natural madd is two counts â€” e.g. the alif in Ù‚ÙŽØ§Ù„ÙŽ. Recite it and I will check your timing.';
+      return 'Madd is elongation. A natural madd is two counts — e.g. the alif in قَالَ. Recite it and I will check your timing.';
     }
     return 'I can currently explain madd and ghunnah. Recitation analysis will be added after the Quran reader is complete.';
   }
@@ -943,7 +1171,7 @@ class _MoulanaScreenState extends State<MoulanaScreen> {
                     onSubmitted: (_) => send(),
                     style: const TextStyle(color: C.cream),
                     decoration: InputDecoration(
-                      hintText: 'Ask your Moulanaâ€¦',
+                      hintText: 'Ask your Moulana…',
                       hintStyle: TextStyle(color: C.cream.withOpacity(0.4)),
                       filled: true,
                       fillColor: C.emerald.withOpacity(0.55),
@@ -993,32 +1221,139 @@ class _MoulanaScreenState extends State<MoulanaScreen> {
   }
 }
 
-class ProgressScreen extends StatelessWidget {
+class ProgressScreen extends StatefulWidget {
   const ProgressScreen({super.key});
+
+  @override
+  State<ProgressScreen> createState() => _ProgressScreenState();
+}
+
+class _ProgressScreenState extends State<ProgressScreen> {
+  String? loadingPlan;
+
+  Future<void> _startCheckout(String plan) async {
+    setState(() => loadingPlan = plan);
+    try {
+      final checkoutUrl = await PaymentService.createCheckout(plan);
+      if (!await launchUrl(checkoutUrl, mode: LaunchMode.externalApplication)) {
+        throw Exception('The checkout page could not be opened.');
+      }
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Payment is not ready: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => loadingPlan = null);
+    }
+  }
 
   @override
   Widget build(BuildContext context) => SafeArea(
         child: ListView(
           padding: const EdgeInsets.all(20),
           children: [
-            Text('Your Journey', style: serif(28, w: FontWeight.bold)),
+            Text(AppLanguage.t('Your Journey', 'رحلتك'), style: serif(28, w: FontWeight.bold)),
             const SizedBox(height: 20),
             const Icon(Icons.menu_book_rounded, size: 64, color: C.gold),
             const SizedBox(height: 12),
-            const Text(
-              'Your reading progress will appear here once bookmarks and revision tracking are enabled.',
+            Text(
+              AppLanguage.t(
+                'Your reading progress will appear here once bookmarks and revision tracking are enabled.',
+                'سيظهر تقدم القراءة هنا عند تفعيل العلامات وتتبع المراجعة.',
+              ),
               textAlign: TextAlign.center,
               style: TextStyle(color: C.cream),
             ),
             const SizedBox(height: 20),
+            Text(AppLanguage.t('HifzAI Plans', 'خطط HifzAI'), style: serif(24, w: FontWeight.bold)),
+            const SizedBox(height: 8),
             Text(
-              'HifzAI supports your learning — it does not replace a qualified Quran teacher.',
+              AppLanguage.t('Optional plans for future premium features', 'خطط اختيارية للميزات المستقبلية المميزة'),
+              textAlign: TextAlign.center,
+              style: TextStyle(color: C.cream.withOpacity(0.7)),
+            ),
+            const SizedBox(height: 14),
+            _planCard(
+              context,
+              title: AppLanguage.t('Monthly', 'شهري'),
+              price: AppInfo.monthlyPrice,
+              period: AppLanguage.t('per month', 'شهرياً'),
+              loading: loadingPlan == 'monthly',
+              onChoose: () => _startCheckout('monthly'),
+            ),
+            const SizedBox(height: 12),
+            _planCard(
+              context,
+              title: AppLanguage.t('Yearly', 'سنوي'),
+              price: AppInfo.yearlyPrice,
+              period: AppLanguage.t('per year', 'سنوياً'),
+              highlighted: true,
+              loading: loadingPlan == 'yearly',
+              onChoose: () => _startCheckout('yearly'),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              AppLanguage.t(
+                'HifzAI supports your learning — it does not replace a qualified Quran teacher.',
+                'يساعدك HifzAI في التعلم ولا يحل محل معلّم قرآن مؤهل.',
+              ),
               textAlign: TextAlign.center,
               style: TextStyle(fontSize: 12, color: C.cream.withOpacity(0.5)),
             ),
           ],
         ),
       );
+
+  static Widget _planCard(
+    BuildContext context, {
+    required String title,
+    required String price,
+    required String period,
+    required VoidCallback onChoose,
+    required bool loading,
+    bool highlighted = false,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: C.emerald.withOpacity(0.55),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: highlighted ? C.gold : C.gold.withOpacity(0.35),
+          width: highlighted ? 2 : 1,
+        ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: serif(21, w: FontWeight.bold)),
+                const SizedBox(height: 4),
+                Text(
+                  '$price $period',
+                  style: const TextStyle(color: C.goldLight, fontWeight: FontWeight.bold),
+                ),
+              ],
+            ),
+          ),
+          OutlinedButton.icon(
+            onPressed: loading ? null : onChoose,
+            icon: loading
+                ? const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.open_in_new_rounded, size: 16),
+            label: Text(loading ? 'Opening' : 'Choose'),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class GoldButton extends StatelessWidget {

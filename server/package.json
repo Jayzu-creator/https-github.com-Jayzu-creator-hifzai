@@ -1,0 +1,13 @@
+{
+  "name": "hifzai-payments",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Secure HifzAI Yoco checkout proxy",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
