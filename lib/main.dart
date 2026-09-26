@@ -6,6 +6,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() => runApp(const HifzAIApp());
 
@@ -33,7 +34,8 @@ class AppLanguage {
   }
 }
 
-TextStyle serif(double size, {FontWeight w = FontWeight.w500, Color? color, double? spacing}) {
+TextStyle serif(double size,
+    {FontWeight w = FontWeight.w500, Color? color, double? spacing}) {
   return GoogleFonts.cormorant(
     fontSize: size,
     fontWeight: w,
@@ -76,6 +78,7 @@ class D {
     return values[DateTime.now().day % values.length];
   }
 }
+
 class QuranAyah {
   final int number;
   final String text;
@@ -113,10 +116,11 @@ class QuranService {
 class PaymentService {
   static const apiBaseUrl = String.fromEnvironment(
     'PAYMENTS_API_BASE_URL',
-    defaultValue: 'https://https-github-com-jayzu-creator-hifzai-1.onrender.com',
+    defaultValue:
+        'https://https-github-com-jayzu-creator-hifzai-1.onrender.com',
   );
 
-  static Future<Uri> createCheckout(String plan) async {
+  static Future<PaymentCheckout> createCheckout(String plan) async {
     final response = await http.post(
       Uri.parse('$apiBaseUrl/create-checkout'),
       headers: const {'Content-Type': 'application/json'},
@@ -127,9 +131,67 @@ class PaymentService {
     }
     final data = jsonDecode(response.body) as Map<String, dynamic>;
     final redirectUrl = data['redirectUrl'] as String?;
-    if (redirectUrl == null) throw Exception('Payment service returned no checkout URL.');
-    return Uri.parse(redirectUrl);
+    if (redirectUrl == null)
+      throw Exception('Payment service returned no checkout URL.');
+    return PaymentCheckout(
+      id: data['checkoutId'] as String,
+      amount: data['amount'] as int,
+      currency: data['currency'] as String,
+      redirectUrl: Uri.parse(redirectUrl),
+    );
   }
+
+  static Future<PaymentStatus> getStatus(String checkoutId) async {
+    final response = await http.get(
+      Uri.parse('$apiBaseUrl/checkout/${Uri.encodeComponent(checkoutId)}'),
+      headers: const {'Accept': 'application/json'},
+    );
+    if (response.statusCode != 200) {
+      throw Exception(
+          'Payment status check returned HTTP ${response.statusCode}.');
+    }
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    return PaymentStatus(
+      id: data['checkoutId'] as String,
+      status: data['status'] as String,
+      amount: data['amount'] as int,
+      currency: data['currency'] as String,
+      paymentId: data['paymentId'] as String?,
+    );
+  }
+}
+
+class PaymentCheckout {
+  final String id;
+  final int amount;
+  final String currency;
+  final Uri redirectUrl;
+
+  const PaymentCheckout({
+    required this.id,
+    required this.amount,
+    required this.currency,
+    required this.redirectUrl,
+  });
+}
+
+class PaymentStatus {
+  final String id;
+  final String status;
+  final int amount;
+  final String currency;
+  final String? paymentId;
+
+  const PaymentStatus({
+    required this.id,
+    required this.status,
+    required this.amount,
+    required this.currency,
+    required this.paymentId,
+  });
+
+  bool confirms(int expectedAmount) =>
+      status == 'completed' && amount == expectedAmount && currency == 'ZAR';
 }
 
 class HifzAIApp extends StatelessWidget {
@@ -148,7 +210,181 @@ class HifzAIApp extends StatelessWidget {
           onSurface: C.cream,
         ),
       ),
-      home: const WifiGate(child: SplashScreen()),
+      home: const PaymentReturnGate(),
+    );
+  }
+}
+
+class PaymentReturnGate extends StatelessWidget {
+  const PaymentReturnGate({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final paymentResult = Uri.base.queryParameters['payment'];
+    if (paymentResult == 'success' ||
+        paymentResult == 'cancelled' ||
+        paymentResult == 'failed') {
+      return PaymentReturnScreen(result: paymentResult!);
+    }
+    return const WifiGate(child: SplashScreen());
+  }
+}
+
+class PaymentReturnScreen extends StatefulWidget {
+  final String result;
+
+  const PaymentReturnScreen({super.key, required this.result});
+
+  @override
+  State<PaymentReturnScreen> createState() => _PaymentReturnScreenState();
+}
+
+class _PaymentReturnScreenState extends State<PaymentReturnScreen> {
+  PaymentStatus? paymentStatus;
+  Object? error;
+  bool checking = true;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.result == 'success') {
+      verifyPayment();
+    } else {
+      checking = false;
+    }
+  }
+
+  Future<void> verifyPayment() async {
+    setState(() {
+      checking = true;
+      error = null;
+    });
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      final checkoutId = preferences.getString('pending_yoco_checkout_id');
+      if (checkoutId == null) {
+        throw Exception('No pending checkout was found on this device.');
+      }
+
+      PaymentStatus? latestStatus;
+      for (var attempt = 0; attempt < 5; attempt++) {
+        latestStatus = await PaymentService.getStatus(checkoutId);
+        if (latestStatus.status == 'completed' ||
+            latestStatus.status == 'failed') break;
+        if (attempt < 4) await Future<void>.delayed(const Duration(seconds: 2));
+      }
+      if (latestStatus == null)
+        throw Exception('Payment status is not available.');
+
+      final expectedAmount = preferences.getInt('pending_yoco_amount');
+      if (expectedAmount == null || latestStatus.amount != expectedAmount) {
+        throw Exception('The payment amount did not match the selected plan.');
+      }
+      if (latestStatus.status == 'completed') {
+        await preferences.remove('pending_yoco_checkout_id');
+        await preferences.remove('pending_yoco_amount');
+      }
+      if (mounted) setState(() => paymentStatus = latestStatus);
+    } catch (verificationError) {
+      if (mounted) setState(() => error = verificationError);
+    } finally {
+      if (mounted) setState(() => checking = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final success = paymentStatus?.confirms(
+          paymentStatus?.amount ?? -1,
+        ) ??
+        false;
+    final title = widget.result == 'cancelled'
+        ? AppLanguage.t('Checkout cancelled', 'تم إلغاء الدفع')
+        : widget.result == 'failed'
+            ? AppLanguage.t('Payment was not completed', 'لم تكتمل عملية الدفع')
+            : checking
+                ? AppLanguage.t('Verifying payment…', 'جارٍ التحقق من الدفع…')
+                : success
+                    ? AppLanguage.t('Payment confirmed', 'تم تأكيد الدفع')
+                    : AppLanguage.t(
+                        'Payment needs checking', 'يحتاج الدفع إلى التحقق');
+    final message = widget.result != 'success'
+        ? AppLanguage.t(
+            'No payment was confirmed. You can return to HifzAI and try again.',
+            'لم يتم تأكيد أي دفعة. يمكنك العودة إلى HifzAI والمحاولة مرة أخرى.',
+          )
+        : checking
+            ? AppLanguage.t(
+                'Please wait while HifzAI securely checks the Yoco transaction.',
+                'يرجى الانتظار بينما يتحقق HifzAI بأمان من معاملة Yoco.',
+              )
+            : success
+                ? AppLanguage.t(
+                    'Yoco confirmed your payment. Paid plan features are not enabled in this release yet.',
+                    'أكدت Yoco عملية الدفع. ميزات الخطة المدفوعة غير مفعّلة في هذا الإصدار بعد.',
+                  )
+                : AppLanguage.t(
+                    error?.toString() ??
+                        'Yoco has not confirmed this payment yet. Do not pay again; retry the check shortly.',
+                    error?.toString() ??
+                        'لم تؤكد Yoco الدفع بعد. لا تدفع مرة أخرى؛ أعد التحقق بعد قليل.',
+                  );
+
+    return Scaffold(
+      backgroundColor: C.emeraldDark,
+      body: SafeArea(
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  checking
+                      ? Icons.hourglass_top_rounded
+                      : success
+                          ? Icons.verified_rounded
+                          : Icons.info_outline_rounded,
+                  color: C.goldLight,
+                  size: 72,
+                ),
+                const SizedBox(height: 20),
+                Text(title,
+                    textAlign: TextAlign.center,
+                    style: serif(30, w: FontWeight.bold)),
+                const SizedBox(height: 12),
+                Text(
+                  message,
+                  textAlign: TextAlign.center,
+                  style:
+                      TextStyle(color: C.cream.withOpacity(0.8), height: 1.5),
+                ),
+                const SizedBox(height: 24),
+                if (checking)
+                  const CircularProgressIndicator(color: C.gold)
+                else ...[
+                  if (widget.result == 'success' && !success)
+                    GoldButton(
+                      label: AppLanguage.t('Check again', 'تحقق مرة أخرى'),
+                      icon: Icons.refresh_rounded,
+                      onPressed: verifyPayment,
+                    ),
+                  const SizedBox(height: 10),
+                  OutlinedButton(
+                    onPressed: () => Navigator.of(context).pushAndRemoveUntil(
+                      MaterialPageRoute(
+                          builder: (_) => const WifiGate(child: MainShell())),
+                      (_) => false,
+                    ),
+                    child: Text(
+                        AppLanguage.t('Return to HifzAI', 'العودة إلى HifzAI')),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -173,7 +409,8 @@ class _WifiGateState extends State<WifiGate> {
     _checkConnection();
     subscription = connectivity.onConnectivityChanged.listen((results) {
       if (mounted) {
-        setState(() => wifiAvailable = results.contains(ConnectivityResult.wifi));
+        setState(
+            () => wifiAvailable = results.contains(ConnectivityResult.wifi));
       }
     });
   }
@@ -254,7 +491,8 @@ class SplashScreen extends StatefulWidget {
   State<SplashScreen> createState() => _SplashScreenState();
 }
 
-class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderStateMixin {
+class _SplashScreenState extends State<SplashScreen>
+    with SingleTickerProviderStateMixin {
   Timer? navigationTimer;
 
   late final AnimationController controller = AnimationController(
@@ -316,7 +554,8 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
                     border: Border.all(color: C.gold, width: 3),
                     color: C.emeraldDark,
                   ),
-                  child: const Icon(Icons.menu_book_rounded, size: 74, color: C.goldLight),
+                  child: const Icon(Icons.menu_book_rounded,
+                      size: 74, color: C.goldLight),
                 ),
                 const SizedBox(height: 26),
                 RichText(
@@ -362,17 +601,20 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     (
       icon: Icons.mic_rounded,
       title: 'Recite & Be Heard',
-      desc: 'Read the complete Quran and build a daily memorisation habit. Recitation checking will be added in a later release.'
+      desc:
+          'Read the complete Quran and build a daily memorisation habit. Recitation checking will be added in a later release.'
     ),
     (
       icon: Icons.fact_check_rounded,
       title: 'Hifz Examination',
-      desc: 'Memorisation tests like a real examiner — “Continue from Ayah 12.” No mushaf, no hints.'
+      desc:
+          'Memorisation tests like a real examiner — “Continue from Ayah 12.” No mushaf, no hints.'
     ),
     (
       icon: Icons.workspace_premium_rounded,
       title: 'Never Forget the Word',
-      desc: 'Daily ayahs, streaks and revision reminders keep the Quran alive in your heart.'
+      desc:
+          'Daily ayahs, streaks and revision reminders keep the Quran alive in your heart.'
     ),
   ];
 
@@ -429,10 +671,12 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                               padding: const EdgeInsets.all(28),
                               decoration: BoxDecoration(
                                 shape: BoxShape.circle,
-                                border: Border.all(color: C.gold.withOpacity(0.5), width: 2),
+                                border: Border.all(
+                                    color: C.gold.withOpacity(0.5), width: 2),
                                 color: C.emerald.withOpacity(0.5),
                               ),
-                              child: Icon(slide.icon, size: 64, color: C.goldLight),
+                              child: Icon(slide.icon,
+                                  size: 64, color: C.goldLight),
                             ),
                             const SizedBox(height: 36),
                             Text(
@@ -477,7 +721,9 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
             Padding(
               padding: const EdgeInsets.all(28),
               child: GoldButton(
-                label: pageIndex == slides.length - 1 ? 'Begin Your Journey' : 'Next',
+                label: pageIndex == slides.length - 1
+                    ? 'Begin Your Journey'
+                    : 'Next',
                 icon: Icons.arrow_forward,
                 onPressed: next,
               ),
@@ -521,10 +767,18 @@ class _MainShellState extends State<MainShell> {
           backgroundColor: C.emerald,
           indicatorColor: C.gold.withOpacity(0.25),
           destinations: [
-            NavigationDestination(icon: const Icon(Icons.home_rounded), label: AppLanguage.t('Home', 'الرئيسية')),
-            NavigationDestination(icon: const Icon(Icons.fact_check_rounded), label: AppLanguage.t('Examiner', 'الاختبار')),
-            NavigationDestination(icon: const Icon(Icons.record_voice_over_rounded), label: AppLanguage.t('Moulana', 'المعلّم')),
-            NavigationDestination(icon: const Icon(Icons.insights_rounded), label: AppLanguage.t('Progress', 'التقدم')),
+            NavigationDestination(
+                icon: const Icon(Icons.home_rounded),
+                label: AppLanguage.t('Home', 'الرئيسية')),
+            NavigationDestination(
+                icon: const Icon(Icons.fact_check_rounded),
+                label: AppLanguage.t('Examiner', 'الاختبار')),
+            NavigationDestination(
+                icon: const Icon(Icons.record_voice_over_rounded),
+                label: AppLanguage.t('Moulana', 'المعلّم')),
+            NavigationDestination(
+                icon: const Icon(Icons.insights_rounded),
+                label: AppLanguage.t('Progress', 'التقدم')),
           ],
         ),
       ),
@@ -548,21 +802,32 @@ class HomeScreen extends StatelessWidget {
                 children: [
                   Row(
                     children: [
-                      Expanded(child: Text(AppLanguage.t('Assalamu ʿAlaykum', 'السلام عليكم'), style: serif(30, w: FontWeight.bold))),
+                      Expanded(
+                          child: Text(
+                              AppLanguage.t(
+                                  'Assalamu ʿAlaykum', 'السلام عليكم'),
+                              style: serif(30, w: FontWeight.bold))),
                       IconButton(
                         tooltip: AppLanguage.t('العربية', 'English'),
-                        onPressed: () => AppLanguage.arabic.value = !AppLanguage.arabic.value,
-                        icon: const Icon(Icons.translate_rounded, color: C.goldLight),
+                        onPressed: () => AppLanguage.arabic.value =
+                            !AppLanguage.arabic.value,
+                        icon: const Icon(Icons.translate_rounded,
+                            color: C.goldLight),
                       ),
                     ],
                   ),
-                  Text(AppLanguage.t('Read, learn and memorise — free for everyone.', 'اقرأ وتعلّم واحفظ — مجاناً للجميع.'), style: TextStyle(color: C.goldLight.withOpacity(0.9))),
+                  Text(
+                      AppLanguage.t(
+                          'Read, learn and memorise — free for everyone.',
+                          'اقرأ وتعلّم واحفظ — مجاناً للجميع.'),
+                      style: TextStyle(color: C.goldLight.withOpacity(0.9))),
                   const SizedBox(height: 18),
                   const AyahCard(),
                   const SizedBox(height: 18),
                   const FreeServiceBanner(),
                   const SizedBox(height: 22),
-                  Text(AppLanguage.t('Choose a Surah', 'اختر سورة'), style: serif(21, w: FontWeight.w600)),
+                  Text(AppLanguage.t('Choose a Surah', 'اختر سورة'),
+                      style: serif(21, w: FontWeight.w600)),
                   const SizedBox(height: 12),
                 ],
               ),
@@ -582,7 +847,8 @@ class HomeScreen extends StatelessWidget {
                   surah: D.surahs[index],
                   onTap: () => Navigator.push(
                     context,
-                    MaterialPageRoute(builder: (_) => SurahScreen(surah: D.surahs[index])),
+                    MaterialPageRoute(
+                        builder: (_) => SurahScreen(surah: D.surahs[index])),
                   ),
                 ),
                 childCount: D.surahs.length,
@@ -602,7 +868,8 @@ class AyahCard extends StatefulWidget {
   State<AyahCard> createState() => _AyahCardState();
 }
 
-class _AyahCardState extends State<AyahCard> with SingleTickerProviderStateMixin {
+class _AyahCardState extends State<AyahCard>
+    with SingleTickerProviderStateMixin {
   late final AnimationController controller = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 1200),
@@ -643,14 +910,16 @@ class _AyahCardState extends State<AyahCard> with SingleTickerProviderStateMixin
               children: [
                 const Icon(Icons.wb_sunny_rounded, color: C.emeraldDark),
                 const SizedBox(width: 8),
-                Text('Ayah of the Day', style: serif(17, w: FontWeight.bold, color: C.emeraldDark)),
+                Text('Ayah of the Day',
+                    style: serif(17, w: FontWeight.bold, color: C.emeraldDark)),
               ],
             ),
             const SizedBox(height: 14),
             Text(
               D.ayahOfDay(),
               textAlign: TextAlign.right,
-              style: const TextStyle(fontSize: 26, color: C.emeraldDark, height: 1.9),
+              style: const TextStyle(
+                  fontSize: 26, color: C.emeraldDark, height: 1.9),
             ),
             const SizedBox(height: 8),
             Text(
@@ -721,9 +990,13 @@ class SurahTile extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Text(surah.arabic, style: const TextStyle(fontSize: 30, color: C.goldLight, height: 1.6)),
+            Text(surah.arabic,
+                style: const TextStyle(
+                    fontSize: 30, color: C.goldLight, height: 1.6)),
             Text(surah.name, style: serif(17, w: FontWeight.w600)),
-            Text('${surah.ayahs} ayahs', style: TextStyle(fontSize: 12, color: C.cream.withOpacity(0.65))),
+            Text('${surah.ayahs} ayahs',
+                style:
+                    TextStyle(fontSize: 12, color: C.cream.withOpacity(0.65))),
           ],
         ),
       ),
@@ -772,15 +1045,19 @@ class _SurahScreenState extends State<SurahScreen> {
         child: Column(
           children: [
             const SizedBox(height: 8),
-            Text(widget.surah.arabic, style: const TextStyle(fontSize: 40, color: C.goldLight, height: 1.6)),
-            Text('${widget.surah.ayahs} Ayahs', style: TextStyle(color: C.cream.withOpacity(0.7))),
+            Text(widget.surah.arabic,
+                style: const TextStyle(
+                    fontSize: 40, color: C.goldLight, height: 1.6)),
+            Text('${widget.surah.ayahs} Ayahs',
+                style: TextStyle(color: C.cream.withOpacity(0.7))),
             const SizedBox(height: 14),
             Expanded(
               child: FutureBuilder<List<QuranAyah>>(
                 future: ayahs,
                 builder: (context, snapshot) {
                   if (snapshot.connectionState == ConnectionState.waiting) {
-                    return const Center(child: CircularProgressIndicator(color: C.gold));
+                    return const Center(
+                        child: CircularProgressIndicator(color: C.gold));
                   }
                   if (snapshot.hasError) {
                     return Center(
@@ -789,7 +1066,8 @@ class _SurahScreenState extends State<SurahScreen> {
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            const Icon(Icons.cloud_off_rounded, color: C.goldLight, size: 48),
+                            const Icon(Icons.cloud_off_rounded,
+                                color: C.goldLight, size: 48),
                             const SizedBox(height: 12),
                             Text(
                               'The Quran text could not be loaded. Check your internet connection and try again.',
@@ -797,7 +1075,10 @@ class _SurahScreenState extends State<SurahScreen> {
                               style: TextStyle(color: C.cream),
                             ),
                             const SizedBox(height: 16),
-                            GoldButton(label: 'Try Again', icon: Icons.refresh_rounded, onPressed: retry),
+                            GoldButton(
+                                label: 'Try Again',
+                                icon: Icons.refresh_rounded,
+                                onPressed: retry),
                           ],
                         ),
                       ),
@@ -823,7 +1104,11 @@ class _SurahScreenState extends State<SurahScreen> {
                             CircleAvatar(
                               radius: 14,
                               backgroundColor: C.goldLight,
-                              child: Text('${ayah.number}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: C.emeraldDark)),
+                              child: Text('${ayah.number}',
+                                  style: const TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.bold,
+                                      color: C.emeraldDark)),
                             ),
                             const SizedBox(width: 12),
                             Expanded(
@@ -861,7 +1146,9 @@ class ExaminerScreen extends StatelessWidget {
           const SizedBox(height: 20),
           const Icon(Icons.verified_user_rounded, size: 68, color: C.gold),
           const SizedBox(height: 12),
-          Center(child: Text(AppLanguage.t('Hifz Examiner', 'اختبار الحفظ'), style: serif(30, w: FontWeight.bold))),
+          Center(
+              child: Text(AppLanguage.t('Hifz Examiner', 'اختبار الحفظ'),
+                  style: serif(30, w: FontWeight.bold))),
           const SizedBox(height: 10),
           Center(
             child: Text(
@@ -874,13 +1161,29 @@ class ExaminerScreen extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 26),
-          _feature(Icons.menu_book_rounded, AppLanguage.t('Read every Surah', 'اقرأ كل السور'), AppLanguage.t('Open any Surah from Home and read the complete live Quran text.', 'افتح أي سورة من الرئيسية واقرأ نص القرآن كاملاً.' )),
-          _feature(Icons.mic_none_rounded, AppLanguage.t('Recitation checking', 'فحص التلاوة'), AppLanguage.t('Audio analysis is being built next. This version does not invent scores or feedback.', 'سيتم إضافة تحليل الصوت لاحقاً. هذا الإصدار لا يخترع درجات أو ملاحظات.' )),
-          _feature(Icons.public_rounded, AppLanguage.t('Core reading is free', 'القراءة الأساسية مجانية'), AppLanguage.t('Read the Quran without an account. Optional plans will be connected to payments separately.', 'اقرأ القرآن بدون حساب. سيتم ربط الخطط الاختيارية بالدفع بشكل منفصل.' )),
+          _feature(
+              Icons.menu_book_rounded,
+              AppLanguage.t('Read every Surah', 'اقرأ كل السور'),
+              AppLanguage.t(
+                  'Open any Surah from Home and read the complete live Quran text.',
+                  'افتح أي سورة من الرئيسية واقرأ نص القرآن كاملاً.')),
+          _feature(
+              Icons.mic_none_rounded,
+              AppLanguage.t('Recitation checking', 'فحص التلاوة'),
+              AppLanguage.t(
+                  'Audio analysis is being built next. This version does not invent scores or feedback.',
+                  'سيتم إضافة تحليل الصوت لاحقاً. هذا الإصدار لا يخترع درجات أو ملاحظات.')),
+          _feature(
+              Icons.public_rounded,
+              AppLanguage.t('Core reading is free', 'القراءة الأساسية مجانية'),
+              AppLanguage.t(
+                  'Read the Quran without an account. Optional plans will be connected to payments separately.',
+                  'اقرأ القرآن بدون حساب. سيتم ربط الخطط الاختيارية بالدفع بشكل منفصل.')),
           const SizedBox(height: 22),
           OutlinedButton.icon(
             icon: const Icon(Icons.home_rounded),
-            label: Text(AppLanguage.t('Choose a Surah from Home', 'اختر سورة من الرئيسية')),
+            label: Text(AppLanguage.t(
+                'Choose a Surah from Home', 'اختر سورة من الرئيسية')),
             onPressed: () => Navigator.of(context).maybePop(),
             style: OutlinedButton.styleFrom(
               foregroundColor: C.goldLight,
@@ -890,7 +1193,8 @@ class ExaminerScreen extends StatelessWidget {
           ),
           const SizedBox(height: 12),
           GoldButton(
-            label: AppLanguage.t('Start a Memorisation Test', 'ابدأ اختبار الحفظ'),
+            label:
+                AppLanguage.t('Start a Memorisation Test', 'ابدأ اختبار الحفظ'),
             icon: Icons.play_arrow_rounded,
             onPressed: () => Navigator.of(context).push(
               MaterialPageRoute(builder: (_) => const MemorisationTestScreen()),
@@ -918,8 +1222,12 @@ class ExaminerScreen extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title, style: const TextStyle(fontWeight: FontWeight.bold, color: C.cream)),
-                Text(detail, style: TextStyle(fontSize: 13, color: C.cream.withOpacity(0.7))),
+                Text(title,
+                    style: const TextStyle(
+                        fontWeight: FontWeight.bold, color: C.cream)),
+                Text(detail,
+                    style: TextStyle(
+                        fontSize: 13, color: C.cream.withOpacity(0.7))),
               ],
             ),
           ),
@@ -993,21 +1301,26 @@ class _MemorisationTestScreenState extends State<MemorisationTestScreen> {
             value: selectedSurah,
             decoration: const InputDecoration(labelText: 'Surah'),
             items: D.surahs
-                .map((surah) => DropdownMenuItem(value: surah, child: Text(surah.name)))
+                .map((surah) =>
+                    DropdownMenuItem(value: surah, child: Text(surah.name)))
                 .toList(),
             onChanged: (surah) {
               if (surah != null) setState(() => selectedSurah = surah);
             },
           ),
           const SizedBox(height: 14),
-          GoldButton(label: 'Load Test', icon: Icons.download_rounded, onPressed: startTest),
+          GoldButton(
+              label: 'Load Test',
+              icon: Icons.download_rounded,
+              onPressed: startTest),
           if (loaded != null) ...[
             const SizedBox(height: 24),
             FutureBuilder<List<QuranAyah>>(
               future: loaded,
               builder: (context, snapshot) {
                 if (snapshot.connectionState == ConnectionState.waiting) {
-                  return const Center(child: CircularProgressIndicator(color: C.gold));
+                  return const Center(
+                      child: CircularProgressIndicator(color: C.gold));
                 }
                 if (snapshot.hasError) {
                   return const Text(
@@ -1090,7 +1403,8 @@ class _MemorisationTestScreenState extends State<MemorisationTestScreen> {
         const SizedBox(height: 10),
         Text('Test complete', style: serif(24, w: FontWeight.bold)),
         const SizedBox(height: 8),
-        Text('$correct remembered • $needsRevision to revise', style: const TextStyle(color: C.cream)),
+        Text('$correct remembered • $needsRevision to revise',
+            style: const TextStyle(color: C.cream)),
       ],
     );
   }
@@ -1105,7 +1419,8 @@ class MoulanaScreen extends StatefulWidget {
 
 class _MoulanaScreenState extends State<MoulanaScreen> {
   final messages = <MapEntry<bool, String>>[
-    const MapEntry(false, 'Assalamu ʿAlaykum. This Tajweed guide explains foundational concepts such as madd and ghunnah.'),
+    const MapEntry(false,
+        'Assalamu ʿAlaykum. This Tajweed guide explains foundational concepts such as madd and ghunnah.'),
   ];
   final controller = TextEditingController();
 
@@ -1207,7 +1522,8 @@ class _MoulanaScreenState extends State<MoulanaScreen> {
       child: Container(
         margin: const EdgeInsets.only(bottom: 10),
         padding: const EdgeInsets.all(14),
-        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.78),
+        constraints:
+            BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.78),
         decoration: BoxDecoration(
           color: isUser ? C.gold : C.emerald.withOpacity(0.65),
           borderRadius: BorderRadius.circular(16),
@@ -1234,8 +1550,12 @@ class _ProgressScreenState extends State<ProgressScreen> {
   Future<void> _startCheckout(String plan) async {
     setState(() => loadingPlan = plan);
     try {
-      final checkoutUrl = await PaymentService.createCheckout(plan);
-      if (!await launchUrl(checkoutUrl, mode: LaunchMode.externalApplication)) {
+      final checkout = await PaymentService.createCheckout(plan);
+      final preferences = await SharedPreferences.getInstance();
+      await preferences.setString('pending_yoco_checkout_id', checkout.id);
+      await preferences.setInt('pending_yoco_amount', checkout.amount);
+      if (!await launchUrl(checkout.redirectUrl,
+          mode: LaunchMode.externalApplication)) {
         throw Exception('The checkout page could not be opened.');
       }
     } catch (error) {
@@ -1253,7 +1573,8 @@ class _ProgressScreenState extends State<ProgressScreen> {
         child: ListView(
           padding: const EdgeInsets.all(20),
           children: [
-            Text(AppLanguage.t('Your Journey', 'رحلتك'), style: serif(28, w: FontWeight.bold)),
+            Text(AppLanguage.t('Your Journey', 'رحلتك'),
+                style: serif(28, w: FontWeight.bold)),
             const SizedBox(height: 20),
             const Icon(Icons.menu_book_rounded, size: 64, color: C.gold),
             const SizedBox(height: 12),
@@ -1266,10 +1587,12 @@ class _ProgressScreenState extends State<ProgressScreen> {
               style: TextStyle(color: C.cream),
             ),
             const SizedBox(height: 20),
-            Text(AppLanguage.t('HifzAI Plans', 'خطط HifzAI'), style: serif(24, w: FontWeight.bold)),
+            Text(AppLanguage.t('HifzAI Plans', 'خطط HifzAI'),
+                style: serif(24, w: FontWeight.bold)),
             const SizedBox(height: 8),
             Text(
-              AppLanguage.t('Optional plans for future premium features', 'خطط اختيارية للميزات المستقبلية المميزة'),
+              AppLanguage.t('Optional plans for future premium features',
+                  'خطط اختيارية للميزات المستقبلية المميزة'),
               textAlign: TextAlign.center,
               style: TextStyle(color: C.cream.withOpacity(0.7)),
             ),
@@ -1334,7 +1657,8 @@ class _ProgressScreenState extends State<ProgressScreen> {
                 const SizedBox(height: 4),
                 Text(
                   '$price $period',
-                  style: const TextStyle(color: C.goldLight, fontWeight: FontWeight.bold),
+                  style: const TextStyle(
+                      color: C.goldLight, fontWeight: FontWeight.bold),
                 ),
               ],
             ),
@@ -1361,14 +1685,19 @@ class GoldButton extends StatelessWidget {
   final IconData icon;
   final VoidCallback onPressed;
 
-  const GoldButton({super.key, required this.label, required this.icon, required this.onPressed});
+  const GoldButton(
+      {super.key,
+      required this.label,
+      required this.icon,
+      required this.onPressed});
 
   @override
   Widget build(BuildContext context) {
     return FilledButton.icon(
       onPressed: onPressed,
       icon: Icon(icon),
-      label: Text(label, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+      label: Text(label,
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
       style: FilledButton.styleFrom(
         backgroundColor: C.gold,
         foregroundColor: C.emeraldDark,
