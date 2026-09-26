@@ -5,11 +5,24 @@ const port = Number(process.env.PORT || 3000);
 const yocoSecretKey = process.env.YOCO_SECRET_KEY;
 const appBaseUrl = process.env.APP_BASE_URL;
 const allowedOrigin = process.env.ALLOWED_ORIGIN;
+const checkoutRequests = new Map();
 
 const plans = Object.freeze({
   monthly: { amount: 20000, name: 'HifzAI Monthly' },
   yearly: { amount: 150000, name: 'HifzAI Yearly' },
 });
+
+function isRateLimited(ip) {
+  const now = Date.now();
+  const recent = (checkoutRequests.get(ip) || []).filter((time) => now - time < 10 * 60 * 1000);
+  if (recent.length >= 10) {
+    checkoutRequests.set(ip, recent);
+    return true;
+  }
+  recent.push(now);
+  checkoutRequests.set(ip, recent);
+  return false;
+}
 
 function json(res, status, body) {
   res.writeHead(status, {
@@ -73,21 +86,28 @@ const server = http.createServer(async (req, res) => {
       if (!yocoSecretKey || !appBaseUrl || !allowedOrigin) {
         return json(res, 503, { error: 'Payment service is not configured.' });
       }
+      if (origin && origin !== allowedOrigin) {
+        return json(res, 403, { error: 'This website is not allowed to start checkout.' });
+      }
+      if (isRateLimited(req.socket.remoteAddress || 'unknown')) {
+        return json(res, 429, { error: 'Too many checkout attempts. Please try again later.' });
+      }
 
       const body = await readJson(req);
       const plan = plans[body.plan];
       if (!plan) return json(res, 400, { error: 'Unknown payment plan.' });
 
       const checkoutId = crypto.randomUUID();
+      const siteUrl = appBaseUrl.replace(/\/+$/, '');
       const checkout = await yocoRequest('/checkouts', {
         method: 'POST',
         headers: { 'Idempotency-Key': checkoutId },
         body: JSON.stringify({
           amount: plan.amount,
           currency: 'ZAR',
-          successUrl: `${appBaseUrl}/?payment=success`,
-          cancelUrl: `${appBaseUrl}/?payment=cancelled`,
-          failureUrl: `${appBaseUrl}/?payment=failed`,
+          successUrl: `${siteUrl}/?payment=success`,
+          cancelUrl: `${siteUrl}/?payment=cancelled`,
+          failureUrl: `${siteUrl}/?payment=failed`,
           externalId: checkoutId,
           metadata: { plan: body.plan },
           lineItems: [{
@@ -109,7 +129,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname.startsWith('/checkout/')) {
       if (!yocoSecretKey) return json(res, 503, { error: 'Payment service is not configured.' });
       const checkoutId = url.pathname.replace('/checkout/', '');
-      if (!/^checkout_[A-Za-z0-9_-]+$/.test(checkoutId)) {
+      if (!/^ch_[A-Za-z0-9_-]+$/.test(checkoutId)) {
         return json(res, 400, { error: 'Invalid checkout ID.' });
       }
       const checkout = await yocoRequest(`/checkouts/${encodeURIComponent(checkoutId)}`);
