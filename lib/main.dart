@@ -113,7 +113,7 @@ class QuranService {
 class PaymentService {
   static const apiBaseUrl = String.fromEnvironment(
     'PAYMENTS_API_BASE_URL',
-    defaultValue: 'http://localhost:3000',
+    defaultValue: 'https://https-github-com-jayzu-creator-hifzai-1.onrender.com',
   );
 
   static Future<Uri> createCheckout(String plan) async {
