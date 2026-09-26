@@ -5,7 +5,6 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
 import 'package:connectivity_plus/connectivity_plus.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() => runApp(const HifzAIApp());
@@ -22,8 +21,6 @@ class AppInfo {
   static const supportEmail = 'hifzalbusinesss@gmail.com';
   static const appName = 'HifzAI';
   static const packageId = 'com.hifzai.quran';
-  static const monthlyPrice = 'R200';
-  static const yearlyPrice = 'R1500';
 }
 
 class AppLanguage {
@@ -1545,29 +1542,6 @@ class ProgressScreen extends StatefulWidget {
 }
 
 class _ProgressScreenState extends State<ProgressScreen> {
-  String? loadingPlan;
-
-  Future<void> _startCheckout(String plan) async {
-    setState(() => loadingPlan = plan);
-    try {
-      final checkout = await PaymentService.createCheckout(plan);
-      final preferences = await SharedPreferences.getInstance();
-      await preferences.setString('pending_yoco_checkout_id', checkout.id);
-      await preferences.setInt('pending_yoco_amount', checkout.amount);
-      if (!await launchUrl(checkout.redirectUrl,
-          mode: LaunchMode.externalApplication)) {
-        throw Exception('The checkout page could not be opened.');
-      }
-    } catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Payment is not ready: $error')),
-      );
-    } finally {
-      if (mounted) setState(() => loadingPlan = null);
-    }
-  }
-
   @override
   Widget build(BuildContext context) => SafeArea(
         child: ListView(
@@ -1591,29 +1565,99 @@ class _ProgressScreenState extends State<ProgressScreen> {
                 style: serif(24, w: FontWeight.bold)),
             const SizedBox(height: 8),
             Text(
-              AppLanguage.t('Optional plans for future premium features',
-                  'خطط اختيارية للميزات المستقبلية المميزة'),
+              AppLanguage.t(
+                'Core Quran reading is free. Paid features are being built and are not available to buy yet.',
+                'قراءة القرآن الأساسية مجانية. الميزات المدفوعة قيد التطوير وغير متاحة للشراء حالياً.',
+              ),
               textAlign: TextAlign.center,
               style: TextStyle(color: C.cream.withOpacity(0.7)),
             ),
             const SizedBox(height: 14),
             _planCard(
-              context,
-              title: AppLanguage.t('Monthly', 'شهري'),
-              price: AppInfo.monthlyPrice,
-              period: AppLanguage.t('per month', 'شهرياً'),
-              loading: loadingPlan == 'monthly',
-              onChoose: () => _startCheckout('monthly'),
+              title: AppLanguage.t('HifzAI Free', 'HifzAI مجاني'),
+              price: 'R0',
+              period: AppLanguage.t('Free forever', 'مجاني دائماً'),
+              status: AppLanguage.t('Available now', 'متاح الآن'),
+              features: [
+                AppLanguage.t('Live Quran text for the listed Surahs',
+                    'نص القرآن المباشر للسور المدرجة'),
+                AppLanguage.t('Self-guided ayah recall test',
+                    'اختبار ذاتي لاسترجاع الآيات'),
+                AppLanguage.t('Basic Tajweed learning guide',
+                    'دليل أساسي لتعلّم التجويد'),
+                AppLanguage.t('English and Arabic interface',
+                    'واجهة بالإنجليزية والعربية'),
+                AppLanguage.t('No ads in the current app',
+                    'لا توجد إعلانات في التطبيق حالياً'),
+                AppLanguage.t('Planned: up to 3 AI recitation checks per day',
+                    'مخطط: حتى 3 فحوص للتلاوة بالذكاء الاصطناعي يومياً'),
+                AppLanguage.t(
+                    'Planned: basic Hifz tracking, limited history, and revision tools',
+                    'مخطط: تتبع أساسي للحفظ وسجل محدود وأدوات للمراجعة'),
+                AppLanguage.t('AI recitation checks are not available yet',
+                    'فحص التلاوة بالذكاء الاصطناعي غير متاح بعد'),
+              ],
             ),
             const SizedBox(height: 12),
             _planCard(
-              context,
-              title: AppLanguage.t('Yearly', 'سنوي'),
-              price: AppInfo.yearlyPrice,
-              period: AppLanguage.t('per year', 'سنوياً'),
+              title: AppLanguage.t('HifzAI Plus', 'HifzAI بلس'),
+              price: 'R199',
+              period: AppLanguage.t(
+                'per month • R1,499 per year (about R125/month)',
+                'شهرياً • 1,499 راند سنوياً (حوالي 125 راند شهرياً)',
+              ),
+              status: AppLanguage.t(
+                'Coming soon — recommended for focused learners',
+                'قريباً — موصى به للمتعلمين الجادين',
+              ),
+              badge: AppLanguage.t('Recommended', 'موصى به'),
+              features: [
+                AppLanguage.t(
+                    'Planned: up to 50 AI recitation checks per month',
+                    'مخطط: حتى 50 فحص تلاوة بالذكاء الاصطناعي شهرياً'),
+                AppLanguage.t(
+                    'Planned: advanced Tajweed feedback and missing/wrong-word detection',
+                    'مخطط: ملاحظات متقدمة للتجويد واكتشاف الكلمات الناقصة أو الخاطئة'),
+                AppLanguage.t(
+                    'Planned: madd timing, ghunnah, qalqalah, ikhfa, and idgham feedback',
+                    'مخطط: ملاحظات للمد والغنة والقلقلة والإخفاء والإدغام'),
+                AppLanguage.t(
+                    'Planned: makharij feedback where technically supported',
+                    'مخطط: ملاحظات للمخارج حيثما أمكن تقنياً'),
+                AppLanguage.t(
+                    'Planned: Hifz tracking, revision sessions, and practice recommendations',
+                    'مخطط: تتبع الحفظ وجلسات المراجعة وتوصيات التدريب'),
+                AppLanguage.t(
+                    'Planned: progress history, core AI tutor, and no ads',
+                    'مخطط: سجل التقدم والمعلّم الذكي الأساسي وبدون إعلانات'),
+              ],
               highlighted: true,
-              loading: loadingPlan == 'yearly',
-              onChoose: () => _startCheckout('yearly'),
+            ),
+            const SizedBox(height: 20),
+            _planCard(
+              title: AppLanguage.t('HifzAI Pro', 'HifzAI برو'),
+              price: 'R299',
+              period: AppLanguage.t('per month', 'شهرياً'),
+              status: AppLanguage.t('Coming soon', 'قريباً'),
+              features: [
+                AppLanguage.t(
+                    'Planned: up to 150 AI recitation checks per month',
+                    'مخطط: حتى 150 فحص تلاوة بالذكاء الاصطناعي شهرياً'),
+                AppLanguage.t('Planned: everything proposed for Plus',
+                    'مخطط: جميع ميزات بلس المقترحة'),
+                AppLanguage.t(
+                    'Planned: more detailed pronunciation analysis and longer practice sessions',
+                    'مخطط: تحليل أدق للنطق وجلسات تدريب أطول'),
+                AppLanguage.t(
+                    'Planned: advanced memorisation analytics and custom revision plans',
+                    'مخطط: تحليلات متقدمة للحفظ وخطط مراجعة مخصصة'),
+                AppLanguage.t(
+                    'Planned: difficult-ayah tracking and weak-area identification',
+                    'مخطط: تتبع الآيات الصعبة وتحديد مواطن الضعف'),
+                AppLanguage.t(
+                    'Planned: detailed performance reports, priority new features, and no ads',
+                    'مخطط: تقارير أداء مفصلة وأولوية الميزات الجديدة وبدون إعلانات'),
+              ],
             ),
             const SizedBox(height: 20),
             Text(
@@ -1628,13 +1672,13 @@ class _ProgressScreenState extends State<ProgressScreen> {
         ),
       );
 
-  static Widget _planCard(
-    BuildContext context, {
+  static Widget _planCard({
     required String title,
     required String price,
     required String period,
-    required VoidCallback onChoose,
-    required bool loading,
+    required String status,
+    required List<String> features,
+    String? badge,
     bool highlighted = false,
   }) {
     return Container(
@@ -1648,31 +1692,65 @@ class _ProgressScreenState extends State<ProgressScreen> {
         ),
       ),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title, style: serif(21, w: FontWeight.bold)),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 6,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Text(title, style: serif(21, w: FontWeight.bold)),
+                    if (badge != null)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 9, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: C.gold.withOpacity(0.18),
+                          borderRadius: BorderRadius.circular(99),
+                        ),
+                        child: Text(
+                          badge,
+                          style: const TextStyle(
+                              color: C.goldLight,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                  ],
+                ),
                 const SizedBox(height: 4),
                 Text(
-                  '$price $period',
+                  '$price ${AppLanguage.t('•', '•')} $period',
                   style: const TextStyle(
                       color: C.goldLight, fontWeight: FontWeight.bold),
                 ),
+                const SizedBox(height: 8),
+                Text(status,
+                    style: TextStyle(
+                        color: C.cream.withOpacity(0.65), fontSize: 13)),
+                const SizedBox(height: 8),
+                ...features.map((feature) => Padding(
+                      padding: const EdgeInsets.only(top: 5),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Icon(Icons.check_circle_outline,
+                              color: C.goldLight, size: 17),
+                          const SizedBox(width: 8),
+                          Expanded(
+                              child: Text(feature,
+                                  style: TextStyle(
+                                      color: C.cream.withOpacity(0.85),
+                                      height: 1.35))),
+                        ],
+                      ),
+                    )),
               ],
             ),
-          ),
-          OutlinedButton.icon(
-            onPressed: loading ? null : onChoose,
-            icon: loading
-                ? const SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.open_in_new_rounded, size: 16),
-            label: Text(loading ? 'Opening' : 'Choose'),
           ),
         ],
       ),

@@ -5,11 +5,13 @@ const port = Number(process.env.PORT || 3000);
 const yocoSecretKey = process.env.YOCO_SECRET_KEY;
 const appBaseUrl = process.env.APP_BASE_URL;
 const allowedOrigin = process.env.ALLOWED_ORIGIN;
+const paidPlansEnabled = process.env.PAID_PLANS_ENABLED === 'true';
 const checkoutRequests = new Map();
 
 const plans = Object.freeze({
-  monthly: { amount: 20000, name: 'HifzAI Monthly' },
-  yearly: { amount: 150000, name: 'HifzAI Yearly' },
+  plus_monthly: { amount: 19900, name: 'HifzAI Plus Monthly' },
+  plus_yearly: { amount: 149900, name: 'HifzAI Plus Yearly' },
+  pro_monthly: { amount: 29900, name: 'HifzAI Pro Monthly' },
 });
 
 function isRateLimited(ip) {
@@ -83,6 +85,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && url.pathname === '/create-checkout') {
+      if (!paidPlansEnabled) {
+        return json(res, 503, { error: 'Paid plans are coming soon and checkout is not available yet.' });
+      }
       if (!yocoSecretKey || !appBaseUrl || !allowedOrigin) {
         return json(res, 503, { error: 'Payment service is not configured.' });
       }

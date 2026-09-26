@@ -12,3 +12,5 @@ services:
         sync: false
       - key: ALLOWED_ORIGIN
         sync: false
+      - key: PAID_PLANS_ENABLED
+        value: "false"

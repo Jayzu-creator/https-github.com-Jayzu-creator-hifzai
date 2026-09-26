@@ -10,9 +10,8 @@ HifzAI is a free, Wi-Fi-only Quran reading and memorisation companion built with
 - Tajweed learning guide
 - Wi-Fi-only network access
 - No account required for core Quran reading
-- Planned optional plans: R200 per month or R1500 per year
 
-Recitation analysis and payment processing are not enabled in the current release. The app does not claim to record or assess a user's voice, and the plan prices are displayed for the future payment integration.
+AI recitation analysis, saved progress tracking, automatic monthly renewals, and paid features are not enabled. The plan cards clearly mark future features as planned and unavailable to buy. No test or live payments should be accepted until those services are implemented.
 
 ## Support
 
@@ -42,9 +41,10 @@ then build the app with the public server URL:
 flutter build web --release --dart-define=PAYMENTS_API_BASE_URL=https://your-server.onrender.com
 ```
 
-The backend validates the plans as R200 monthly and R1500 yearly. Use Yoco test keys
-first. Payment access must be confirmed by querying checkout status; a success redirect
-alone is not proof of payment.
+The backend contains the proposed Plus prices (R199 monthly, R1,499 yearly) and Pro price
+(R299 monthly). Paid checkout creation is disabled unless `PAID_PLANS_ENABLED=true` is
+set. Keep this disabled until the paid features, recurring-billing behavior, and access
+entitlements are implemented and verified. A success redirect alone is never proof of payment.
 
 Build a web release:
 

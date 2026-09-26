@@ -22,15 +22,19 @@ npm start
 
 Deploy the `server` directory to Render as a Node web service. Add `YOCO_SECRET_KEY`,
 `APP_BASE_URL`, and `ALLOWED_ORIGIN` as Render environment variables. Render provides
-HTTPS automatically. Use the Yoco test key first, then replace it with the live key only
-after the test checkout and status flow are verified.
+HTTPS automatically. Keep paid checkout disabled until the plan features, payment access
+entitlements, and applicable recurring billing have been implemented and verified.
 
-The server validates plans itself:
+The server validates the proposed plan amounts itself:
 
-- `monthly`: R200 (20,000 cents)
-- `yearly`: R1500 (150,000 cents)
+- `plus_monthly`: R199 (19,900 cents)
+- `plus_yearly`: R1,499 (149,900 cents)
+- `pro_monthly`: R299 (29,900 cents)
 
-The app must not unlock paid features from the redirect URL alone. The `/checkout/:id`
-status endpoint must be checked server-side before access is granted. Recurring monthly
-billing also requires a Yoco-supported recurring-billing product; this checkout currently
-creates a one-time payment.
+Checkout creation is disabled unless `PAID_PLANS_ENABLED=true` is set. Leave it unset
+until the paid features are live. The current checkout API creates one-time payments;
+it does not automatically renew monthly plans.
+
+Yoco test transactions do not appear in the merchant dashboard or sales report. Use
+Yoco's test checkout details to exercise the redirect and query `/checkout/:id` to
+verify the test transaction status.
