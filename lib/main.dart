@@ -1,13 +1,27 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:record/record.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
 
-void main() => runApp(const HifzAIApp());
+const supabaseUrl = String.fromEnvironment('SUPABASE_URL');
+const supabaseAnonKey = String.fromEnvironment('SUPABASE_ANON_KEY');
+const paidCheckoutEnabled = bool.fromEnvironment('ENABLE_PAID_CHECKOUT');
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  if (supabaseUrl.isNotEmpty && supabaseAnonKey.isNotEmpty) {
+    await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
+  }
+  runApp(const HifzAIApp());
+}
 
 class C {
   static const emerald = Color(0xFF0C3B2E);
@@ -110,6 +124,43 @@ class QuranService {
   }
 }
 
+Uint8List pcm16ToWav(
+  Uint8List samples, {
+  int sampleRate = 16000,
+  int channels = 1,
+}) {
+  if (sampleRate <= 0 || channels <= 0 || samples.length.isOdd) {
+    throw ArgumentError(
+        'PCM audio must use valid WAV parameters and 16-bit samples.');
+  }
+  final byteRate = sampleRate * channels * 2;
+  final blockAlign = channels * 2;
+  final header = ByteData(44);
+  void writeText(int offset, String value) {
+    for (var index = 0; index < value.length; index++) {
+      header.setUint8(offset + index, value.codeUnitAt(index));
+    }
+  }
+
+  writeText(0, 'RIFF');
+  header.setUint32(4, samples.length + 36, Endian.little);
+  writeText(8, 'WAVE');
+  writeText(12, 'fmt ');
+  header.setUint32(16, 16, Endian.little);
+  header.setUint16(20, 1, Endian.little);
+  header.setUint16(22, channels, Endian.little);
+  header.setUint32(24, sampleRate, Endian.little);
+  header.setUint32(28, byteRate, Endian.little);
+  header.setUint16(32, blockAlign, Endian.little);
+  header.setUint16(34, 16, Endian.little);
+  writeText(36, 'data');
+  header.setUint32(40, samples.length, Endian.little);
+  return (BytesBuilder(copy: false)
+        ..add(header.buffer.asUint8List())
+        ..add(samples))
+      .takeBytes();
+}
+
 class PaymentService {
   static const apiBaseUrl = String.fromEnvironment(
     'PAYMENTS_API_BASE_URL',
@@ -117,10 +168,18 @@ class PaymentService {
         'https://https-github-com-jayzu-creator-hifzai-1.onrender.com',
   );
 
+  static String? get accessToken =>
+      Supabase.instance.client.auth.currentSession?.accessToken;
+
   static Future<PaymentCheckout> createCheckout(String plan) async {
+    final token = accessToken;
+    if (token == null) throw Exception('Sign in before choosing a plan.');
     final response = await http.post(
       Uri.parse('$apiBaseUrl/create-checkout'),
-      headers: const {'Content-Type': 'application/json'},
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $token',
+      },
       body: jsonEncode({'plan': plan}),
     );
     if (response.statusCode != 200) {
@@ -138,10 +197,35 @@ class PaymentService {
     );
   }
 
+  static Future<void> launchCheckout(String plan) async {
+    final checkout = await createCheckout(plan);
+    final userId = Supabase.instance.client.auth.currentUser?.id;
+    if (userId == null) throw Exception('Sign in again before paying.');
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setString('pending_yoco_checkout_id', checkout.id);
+    await preferences.setInt('pending_yoco_amount', checkout.amount);
+    await preferences.setString('pending_yoco_user_id', userId);
+    final opened = await launchUrl(
+      checkout.redirectUrl,
+      mode: LaunchMode.platformDefault,
+    );
+    if (!opened) {
+      await preferences.remove('pending_yoco_checkout_id');
+      await preferences.remove('pending_yoco_amount');
+      await preferences.remove('pending_yoco_user_id');
+      throw Exception('The Yoco checkout could not be opened.');
+    }
+  }
+
   static Future<PaymentStatus> getStatus(String checkoutId) async {
+    final token = accessToken;
+    if (token == null) throw Exception('Sign in again to verify your payment.');
     final response = await http.get(
       Uri.parse('$apiBaseUrl/checkout/${Uri.encodeComponent(checkoutId)}'),
-      headers: const {'Accept': 'application/json'},
+      headers: {
+        'Accept': 'application/json',
+        'Authorization': 'Bearer $token',
+      },
     );
     if (response.statusCode != 200) {
       throw Exception(
@@ -154,7 +238,86 @@ class PaymentService {
       amount: data['amount'] as int,
       currency: data['currency'] as String,
       paymentId: data['paymentId'] as String?,
+      entitlement: data['entitlement'] as Map<String, dynamic>?,
     );
+  }
+
+  static Future<Map<String, dynamic>> getEntitlement() async {
+    final token = accessToken;
+    if (token == null) throw Exception('Sign in to load your plan.');
+    final response = await http.get(
+      Uri.parse('$apiBaseUrl/me/entitlement'),
+      headers: {'Authorization': 'Bearer $token'},
+    );
+    if (response.statusCode != 200) {
+      throw Exception('Plan status returned HTTP ${response.statusCode}.');
+    }
+    return jsonDecode(response.body) as Map<String, dynamic>;
+  }
+
+  static Future<bool> isRecitationAvailable() async {
+    final response = await http.get(Uri.parse('$apiBaseUrl/features'));
+    if (response.statusCode != 200) {
+      throw Exception('Feature status returned HTTP ${response.statusCode}.');
+    }
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    return data['recitationEnabled'] == true;
+  }
+
+  static Future<void> saveAyahProgress({
+    required int surahId,
+    required int ayahNumber,
+    required bool remembered,
+  }) async {
+    final client = Supabase.instance.client;
+    final userId = client.auth.currentUser?.id;
+    if (userId == null) throw Exception('Sign in again to save your progress.');
+    await client.from('ayah_progress').upsert(
+      {
+        'user_id': userId,
+        'surah_id': surahId,
+        'ayah_number': ayahNumber,
+        'status': remembered ? 'remembered' : 'needs_revision',
+        'updated_at': DateTime.now().toUtc().toIso8601String(),
+      },
+      onConflict: 'user_id,surah_id,ayah_number',
+    );
+  }
+
+  static Future<List<Map<String, dynamic>>> getAyahProgress() async {
+    final client = Supabase.instance.client;
+    final userId = client.auth.currentUser?.id;
+    if (userId == null) throw Exception('Sign in again to load your progress.');
+    final rows = await client
+        .from('ayah_progress')
+        .select('surah_id, ayah_number, status, updated_at')
+        .eq('user_id', userId)
+        .order('updated_at', ascending: false)
+        .limit(50);
+    return List<Map<String, dynamic>>.from(rows);
+  }
+
+  static Future<Map<String, dynamic>> checkRecitation({
+    required int surahId,
+    required int ayahNumber,
+    required Uint8List wavAudio,
+  }) async {
+    final token = accessToken;
+    if (token == null) throw Exception('Sign in before checking recitation.');
+    final response = await http.post(
+      Uri.parse(
+          '$apiBaseUrl/recitation/check?surahId=$surahId&ayahNumber=$ayahNumber'),
+      headers: {
+        'Authorization': 'Bearer $token',
+        'Content-Type': 'audio/wav',
+      },
+      body: wavAudio,
+    );
+    if (response.statusCode != 200) {
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      throw Exception(body['error'] ?? 'Recitation check failed.');
+    }
+    return jsonDecode(response.body) as Map<String, dynamic>;
   }
 }
 
@@ -178,6 +341,7 @@ class PaymentStatus {
   final int amount;
   final String currency;
   final String? paymentId;
+  final Map<String, dynamic>? entitlement;
 
   const PaymentStatus({
     required this.id,
@@ -185,10 +349,15 @@ class PaymentStatus {
     required this.amount,
     required this.currency,
     required this.paymentId,
+    this.entitlement,
   });
 
   bool confirms(int expectedAmount) =>
-      status == 'completed' && amount == expectedAmount && currency == 'ZAR';
+      status == 'completed' &&
+      amount == expectedAmount &&
+      currency == 'ZAR' &&
+      paymentId != null &&
+      entitlement != null;
 }
 
 class HifzAIApp extends StatelessWidget {
@@ -207,9 +376,201 @@ class HifzAIApp extends StatelessWidget {
           onSurface: C.cream,
         ),
       ),
-      home: const PaymentReturnGate(),
+      home: const AuthGate(),
     );
   }
+}
+
+class AuthGate extends StatelessWidget {
+  const AuthGate({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    if (supabaseUrl.isEmpty || supabaseAnonKey.isEmpty) {
+      return const SetupRequiredScreen();
+    }
+    final client = Supabase.instance.client;
+    return StreamBuilder<AuthState>(
+      stream: client.auth.onAuthStateChange,
+      initialData: AuthState(
+        AuthChangeEvent.initialSession,
+        client.auth.currentSession,
+      ),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting &&
+            snapshot.data == null) {
+          return const Scaffold(
+            backgroundColor: C.emeraldDark,
+            body: Center(child: CircularProgressIndicator(color: C.gold)),
+          );
+        }
+        if (snapshot.data?.session == null) return const SignInScreen();
+        return const PaymentReturnGate();
+      },
+    );
+  }
+}
+
+class SetupRequiredScreen extends StatelessWidget {
+  const SetupRequiredScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        backgroundColor: C.emeraldDark,
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Text(
+              'HifzAI account services are not configured yet. Add the Supabase project URL and public anon key to the web build settings.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: C.cream.withOpacity(0.85), height: 1.5),
+            ),
+          ),
+        ),
+      );
+}
+
+class SignInScreen extends StatefulWidget {
+  const SignInScreen({super.key});
+
+  @override
+  State<SignInScreen> createState() => _SignInScreenState();
+}
+
+class _SignInScreenState extends State<SignInScreen> {
+  final emailController = TextEditingController();
+  final passwordController = TextEditingController();
+  bool createAccount = false;
+  bool loading = false;
+  String? message;
+
+  Future<void> submit() async {
+    setState(() {
+      loading = true;
+      message = null;
+    });
+    try {
+      final auth = Supabase.instance.client.auth;
+      if (createAccount) {
+        final response = await auth.signUp(
+          email: emailController.text.trim(),
+          password: passwordController.text,
+          emailRedirectTo: Uri.base.origin + Uri.base.path,
+        );
+        if (response.session == null && mounted) {
+          setState(() => message = AppLanguage.t(
+                'Check your email to confirm your account, then sign in.',
+                'تحقق من بريدك الإلكتروني لتأكيد الحساب ثم سجّل الدخول.',
+              ));
+        }
+      } else {
+        await auth.signInWithPassword(
+          email: emailController.text.trim(),
+          password: passwordController.text,
+        );
+      }
+    } on AuthException catch (error) {
+      if (mounted) setState(() => message = error.message);
+    } catch (error) {
+      if (mounted)
+        setState(() => message = 'Could not complete sign-in: $error');
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    emailController.dispose();
+    passwordController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        backgroundColor: C.emeraldDark,
+        body: SafeArea(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 440),
+              child: ListView(
+                padding: const EdgeInsets.all(24),
+                shrinkWrap: true,
+                children: [
+                  const Icon(Icons.menu_book_rounded, size: 68, color: C.gold),
+                  const SizedBox(height: 16),
+                  Text(
+                    AppLanguage.t(
+                      createAccount
+                          ? 'Create your HifzAI account'
+                          : 'Sign in to HifzAI',
+                      createAccount
+                          ? 'أنشئ حساب HifzAI'
+                          : 'سجّل الدخول إلى HifzAI',
+                    ),
+                    textAlign: TextAlign.center,
+                    style: serif(28, w: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    AppLanguage.t(
+                      'Your account keeps your plan and learning progress with you.',
+                      'يحفظ حسابك خطتك وتقدمك في التعلم.',
+                    ),
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: C.cream.withOpacity(0.75)),
+                  ),
+                  const SizedBox(height: 26),
+                  TextField(
+                    controller: emailController,
+                    keyboardType: TextInputType.emailAddress,
+                    autofillHints: const [AutofillHints.email],
+                    decoration: const InputDecoration(labelText: 'Email'),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: passwordController,
+                    obscureText: true,
+                    autofillHints: const [AutofillHints.password],
+                    decoration: const InputDecoration(labelText: 'Password'),
+                  ),
+                  if (message != null) ...[
+                    const SizedBox(height: 12),
+                    Text(message!, style: const TextStyle(color: C.goldLight)),
+                  ],
+                  const SizedBox(height: 20),
+                  GoldButton(
+                    label: loading
+                        ? AppLanguage.t('Please wait…', 'يرجى الانتظار…')
+                        : AppLanguage.t(
+                            createAccount ? 'Create account' : 'Sign in',
+                            createAccount ? 'إنشاء حساب' : 'تسجيل الدخول',
+                          ),
+                    icon: createAccount ? Icons.person_add_alt_1 : Icons.login,
+                    onPressed: loading ? () {} : submit,
+                  ),
+                  TextButton(
+                    onPressed: loading
+                        ? null
+                        : () => setState(() {
+                              createAccount = !createAccount;
+                              message = null;
+                            }),
+                    child: Text(AppLanguage.t(
+                      createAccount
+                          ? 'Already have an account? Sign in'
+                          : 'New here? Create an account',
+                      createAccount
+                          ? 'لديك حساب؟ سجّل الدخول'
+                          : 'جديد هنا؟ أنشئ حساباً',
+                    )),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
 }
 
 class PaymentReturnGate extends StatelessWidget {
@@ -259,8 +620,13 @@ class _PaymentReturnScreenState extends State<PaymentReturnScreen> {
     try {
       final preferences = await SharedPreferences.getInstance();
       final checkoutId = preferences.getString('pending_yoco_checkout_id');
+      final checkoutUserId = preferences.getString('pending_yoco_user_id');
+      final currentUserId = Supabase.instance.client.auth.currentUser?.id;
       if (checkoutId == null) {
         throw Exception('No pending checkout was found on this device.');
+      }
+      if (checkoutUserId == null || checkoutUserId != currentUserId) {
+        throw Exception('Sign in to the account that started this checkout.');
       }
 
       PaymentStatus? latestStatus;
@@ -277,9 +643,10 @@ class _PaymentReturnScreenState extends State<PaymentReturnScreen> {
       if (expectedAmount == null || latestStatus.amount != expectedAmount) {
         throw Exception('The payment amount did not match the selected plan.');
       }
-      if (latestStatus.status == 'completed') {
+      if (latestStatus.confirms(expectedAmount)) {
         await preferences.remove('pending_yoco_checkout_id');
         await preferences.remove('pending_yoco_amount');
+        await preferences.remove('pending_yoco_user_id');
       }
       if (mounted) setState(() => paymentStatus = latestStatus);
     } catch (verificationError) {
@@ -317,8 +684,12 @@ class _PaymentReturnScreenState extends State<PaymentReturnScreen> {
               )
             : success
                 ? AppLanguage.t(
-                    'Yoco confirmed your payment. Paid plan features are not enabled in this release yet.',
-                    'أكدت Yoco عملية الدفع. ميزات الخطة المدفوعة غير مفعّلة في هذا الإصدار بعد.',
+                    paymentStatus?.entitlement == null
+                        ? 'Yoco confirmed the payment. Access is still being saved; check your plan status shortly.'
+                        : 'Yoco confirmed your payment and your access period was saved to your account.',
+                    paymentStatus?.entitlement == null
+                        ? 'أكدت Yoco الدفع. ما زال حفظ الوصول جارياً؛ تحقق من حالة خطتك بعد قليل.'
+                        : 'أكدت Yoco الدفع وتم حفظ فترة الوصول في حسابك.',
                   )
                 : AppLanguage.t(
                     error?.toString() ??
@@ -811,6 +1182,13 @@ class HomeScreen extends StatelessWidget {
                         icon: const Icon(Icons.translate_rounded,
                             color: C.goldLight),
                       ),
+                      IconButton(
+                        tooltip: AppLanguage.t('Sign out', 'تسجيل الخروج'),
+                        onPressed: () =>
+                            Supabase.instance.client.auth.signOut(),
+                        icon: const Icon(Icons.logout_rounded,
+                            color: C.goldLight),
+                      ),
                     ],
                   ),
                   Text(
@@ -1168,8 +1546,8 @@ class ExaminerScreen extends StatelessWidget {
               Icons.mic_none_rounded,
               AppLanguage.t('Recitation checking', 'فحص التلاوة'),
               AppLanguage.t(
-                  'Audio analysis is being built next. This version does not invent scores or feedback.',
-                  'سيتم إضافة تحليل الصوت لاحقاً. هذا الإصدار لا يخترع درجات أو ملاحظات.')),
+                  'Record one ayah and receive an automated transcript comparison. It is an estimate, not Tajweed grading.',
+                  'سجّل آية واحدة واحصل على مقارنة آلية للنص. إنها نتيجة تقديرية وليست تقييماً للتجويد.')),
           _feature(
               Icons.public_rounded,
               AppLanguage.t('Core reading is free', 'القراءة الأساسية مجانية'),
@@ -1186,6 +1564,14 @@ class ExaminerScreen extends StatelessWidget {
               foregroundColor: C.goldLight,
               minimumSize: const Size.fromHeight(54),
               side: const BorderSide(color: C.gold),
+            ),
+          ),
+          const SizedBox(height: 12),
+          GoldButton(
+            label: AppLanguage.t('Check a Recitation', 'تحقق من التلاوة'),
+            icon: Icons.mic_rounded,
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const RecitationCheckScreen()),
             ),
           ),
           const SizedBox(height: 12),
@@ -1234,6 +1620,360 @@ class ExaminerScreen extends StatelessWidget {
   }
 }
 
+class RecitationCheckScreen extends StatefulWidget {
+  const RecitationCheckScreen({super.key});
+
+  @override
+  State<RecitationCheckScreen> createState() => _RecitationCheckScreenState();
+}
+
+class _RecitationCheckScreenState extends State<RecitationCheckScreen> {
+  static const maxAudioBytes = 8 * 1024 * 1024;
+  static const maxRecordingDuration = Duration(seconds: 30);
+
+  final recorder = AudioRecorder();
+  final audioChunks = <Uint8List>[];
+  Surah selectedSurah = D.surahs.first;
+  int selectedAyah = 1;
+  bool consented = false;
+  bool recording = false;
+  bool checking = false;
+  bool stopping = false;
+  int recordingSampleRate = 16000;
+  int recordedBytes = 0;
+  Object? error;
+  bool? recitationAvailable;
+  Map<String, dynamic>? result;
+  Uint8List? audio;
+  StreamSubscription<Uint8List>? recordingSubscription;
+  Completer<void>? recordingDone;
+  Timer? recordingTimer;
+  Object? streamError;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadAvailability();
+  }
+
+  Future<void> _loadAvailability() async {
+    try {
+      final available = await PaymentService.isRecitationAvailable();
+      if (mounted) setState(() => recitationAvailable = available);
+    } catch (availabilityError) {
+      if (mounted) {
+        setState(() {
+          recitationAvailable = false;
+          error = availabilityError;
+        });
+      }
+    }
+  }
+
+  Future<void> startRecording() async {
+    if (!consented || recitationAvailable != true) return;
+    setState(() {
+      error = null;
+      result = null;
+      audio = null;
+      audioChunks.clear();
+      recordedBytes = 0;
+      streamError = null;
+    });
+    try {
+      if (!await recorder.hasPermission()) {
+        throw Exception('Microphone permission was not granted.');
+      }
+      recordingDone = Completer<void>();
+      recordingSampleRate = 16000;
+      await recorder.setOnConfigChanged((config) {
+        recordingSampleRate = config.sampleRate;
+      });
+      final stream = await recorder.startStream(
+        const RecordConfig(
+          encoder: AudioEncoder.pcm16bits,
+          sampleRate: 16000,
+          numChannels: 1,
+          echoCancel: true,
+          noiseSuppress: true,
+        ),
+      );
+      recordingSubscription = stream.listen(
+        (chunk) {
+          if (recordedBytes + chunk.length > maxAudioBytes - 44) {
+            error =
+                Exception('Recording is too large. Please try a shorter ayah.');
+            unawaited(stopRecording());
+          } else {
+            audioChunks.add(chunk);
+            recordedBytes += chunk.length;
+          }
+        },
+        onError: (Object value) {
+          streamError = value;
+          if (recordingDone?.isCompleted == false) recordingDone!.complete();
+        },
+        onDone: () {
+          if (recordingDone?.isCompleted == false) recordingDone!.complete();
+        },
+        cancelOnError: false,
+      );
+      recordingTimer = Timer(maxRecordingDuration, () {
+        if (mounted && recording) unawaited(stopRecording());
+      });
+      if (mounted) setState(() => recording = true);
+    } catch (recordError) {
+      if (mounted) setState(() => error = recordError);
+      await recorder.cancel();
+    }
+  }
+
+  Future<void> stopRecording() async {
+    if (!recording || stopping) return;
+    setState(() {
+      stopping = true;
+      recording = false;
+    });
+    recordingTimer?.cancel();
+    try {
+      await recorder.stop();
+      await recordingDone?.future.timeout(const Duration(seconds: 3));
+      if (error != null) throw error!;
+      if (streamError != null)
+        throw Exception('Audio recording failed: $streamError');
+      final builder = BytesBuilder(copy: false);
+      for (final chunk in audioChunks) {
+        builder.add(chunk);
+      }
+      final recorded = builder.takeBytes();
+      if (recorded.isEmpty) {
+        throw Exception('No usable audio was recorded. Please try again.');
+      }
+      final wav = pcm16ToWav(recorded, sampleRate: recordingSampleRate);
+      if (mounted) setState(() => audio = wav);
+    } catch (recordError) {
+      await recorder.cancel();
+      if (mounted) setState(() => error = recordError);
+    } finally {
+      recordingSubscription = null;
+      recordingDone = null;
+      if (mounted) setState(() => stopping = false);
+    }
+  }
+
+  Future<void> submitRecording() async {
+    final recorded = audio;
+    if (recorded == null || checking) return;
+    setState(() {
+      checking = true;
+      error = null;
+      result = null;
+    });
+    try {
+      final response = await PaymentService.checkRecitation(
+        surahId: selectedSurah.id,
+        ayahNumber: selectedAyah,
+        wavAudio: recorded,
+      );
+      if (mounted) setState(() => result = response);
+    } catch (checkError) {
+      if (mounted) setState(() => error = checkError);
+    } finally {
+      audioChunks.clear();
+      if (mounted) {
+        setState(() {
+          checking = false;
+          audio = null;
+        });
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    recordingTimer?.cancel();
+    unawaited(recordingSubscription?.cancel());
+    unawaited(recorder.dispose());
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ayahCount = selectedSurah.ayahs;
+    final comparison = result?['comparison'] as Map<String, dynamic>?;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Recitation check'),
+        backgroundColor: C.emeraldDark,
+        foregroundColor: C.cream,
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(20),
+        children: [
+          Text('Check one ayah', style: serif(28, w: FontWeight.bold)),
+          const SizedBox(height: 8),
+          Text(
+            'After you submit, HifzAI sends your short WAV recording to its server and OpenAI for transcription. HifzAI does not save the audio. Transcription may be inaccurate and does not assess Tajweed.',
+            style: TextStyle(color: C.cream.withOpacity(0.78), height: 1.5),
+          ),
+          if (recitationAvailable != true) ...[
+            const SizedBox(height: 12),
+            Text(
+              recitationAvailable == null
+                  ? 'Checking recitation service availability…'
+                  : 'Recitation checking is currently unavailable. Your microphone will not be activated.',
+              style: const TextStyle(color: C.goldLight),
+            ),
+            if (error != null)
+              TextButton.icon(
+                onPressed: _loadAvailability,
+                icon: const Icon(Icons.refresh_rounded),
+                label: const Text('Check again'),
+              ),
+          ],
+          const SizedBox(height: 18),
+          DropdownButtonFormField<Surah>(
+            value: selectedSurah,
+            decoration: const InputDecoration(labelText: 'Surah'),
+            items: D.surahs
+                .map((surah) =>
+                    DropdownMenuItem(value: surah, child: Text(surah.name)))
+                .toList(),
+            onChanged: recording || checking
+                ? null
+                : (surah) {
+                    if (surah != null) {
+                      setState(() {
+                        selectedSurah = surah;
+                        selectedAyah = 1;
+                        audio = null;
+                        result = null;
+                      });
+                    }
+                  },
+          ),
+          const SizedBox(height: 12),
+          DropdownButtonFormField<int>(
+            value: selectedAyah,
+            decoration: const InputDecoration(labelText: 'Ayah'),
+            items: List.generate(
+              ayahCount,
+              (index) => DropdownMenuItem(
+                value: index + 1,
+                child: Text('${index + 1}'),
+              ),
+            ),
+            onChanged: recording || checking
+                ? null
+                : (ayah) {
+                    if (ayah != null) {
+                      setState(() {
+                        selectedAyah = ayah;
+                        audio = null;
+                        result = null;
+                      });
+                    }
+                  },
+          ),
+          const SizedBox(height: 12),
+          CheckboxListTile(
+            value: consented,
+            onChanged: recording || checking
+                ? null
+                : (value) => setState(() => consented = value ?? false),
+            contentPadding: EdgeInsets.zero,
+            controlAffinity: ListTileControlAffinity.leading,
+            title: const Text(
+              'I agree to record and send this recitation to OpenAI for automated transcription.',
+              style: TextStyle(color: C.cream),
+            ),
+          ),
+          const SizedBox(height: 8),
+          if (recording)
+            OutlinedButton.icon(
+              onPressed: stopping ? null : stopRecording,
+              icon: const Icon(Icons.stop_circle_outlined),
+              label: Text(stopping ? 'Finishing recording…' : 'Stop recording'),
+            )
+          else
+            GoldButton(
+              label: stopping
+                  ? 'Finishing recording…'
+                  : audio == null
+                      ? 'Record (up to 30 seconds)'
+                      : 'Record again',
+              icon: Icons.mic_rounded,
+              onPressed: stopping ||
+                      !consented ||
+                      checking ||
+                      recitationAvailable != true
+                  ? null
+                  : startRecording,
+            ),
+          if (audio != null && !recording) ...[
+            const SizedBox(height: 10),
+            GoldButton(
+              label: checking ? 'Checking…' : 'Send for transcription',
+              icon: Icons.cloud_upload_outlined,
+              onPressed: checking ? null : submitRecording,
+            ),
+          ],
+          if (error != null) ...[
+            const SizedBox(height: 14),
+            Text('$error', style: const TextStyle(color: C.goldLight)),
+          ],
+          if (checking) ...[
+            const SizedBox(height: 18),
+            const Center(child: CircularProgressIndicator(color: C.gold)),
+          ],
+          if (result != null) ...[
+            const SizedBox(height: 20),
+            _resultCard(
+                'Transcription', result!['transcript'] as String? ?? ''),
+            _resultCard(
+                'Quran reference', result!['reference'] as String? ?? '',
+                rtl: true),
+            if (comparison != null)
+              _resultCard(
+                'Estimated word similarity',
+                '${comparison['estimatedSimilarityPercent']}% '
+                    '(${result!['checksUsed']} of ${result!['checksLimit']} checks used)',
+              ),
+            Text(
+              result!['disclaimer'] as String? ?? '',
+              style: TextStyle(color: C.cream.withOpacity(0.7), height: 1.4),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _resultCard(String title, String content, {bool rtl = false}) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: C.emerald.withOpacity(0.55),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: const TextStyle(color: C.goldLight)),
+          const SizedBox(height: 8),
+          Text(
+            content,
+            textDirection: rtl ? TextDirection.rtl : TextDirection.ltr,
+            style: const TextStyle(color: C.cream, height: 1.7),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class MemorisationTestScreen extends StatefulWidget {
   const MemorisationTestScreen({super.key});
 
@@ -1260,6 +2000,7 @@ class _MemorisationTestScreenState extends State<MemorisationTestScreen> {
   }
 
   void mark(bool wasCorrect, List<QuranAyah> loadedAyahs) {
+    final ayah = loadedAyahs[ayahIndex];
     setState(() {
       if (wasCorrect) {
         correct++;
@@ -1271,6 +2012,17 @@ class _MemorisationTestScreenState extends State<MemorisationTestScreen> {
         ayahIndex++;
       } else {
         ayahs = null;
+      }
+    });
+    PaymentService.saveAyahProgress(
+      surahId: selectedSurah.id,
+      ayahNumber: ayah.number,
+      remembered: wasCorrect,
+    ).catchError((Object saveError) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Progress could not be saved: $saveError')),
+        );
       }
     });
   }
@@ -1542,6 +2294,19 @@ class ProgressScreen extends StatefulWidget {
 }
 
 class _ProgressScreenState extends State<ProgressScreen> {
+  Future<Map<String, dynamic>>? entitlementFuture;
+  Future<List<Map<String, dynamic>>>? progressFuture;
+  bool startingCheckout = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (supabaseUrl.isNotEmpty && supabaseAnonKey.isNotEmpty) {
+      entitlementFuture = PaymentService.getEntitlement();
+      progressFuture = PaymentService.getAyahProgress();
+    }
+  }
+
   @override
   Widget build(BuildContext context) => SafeArea(
         child: ListView(
@@ -1549,25 +2314,29 @@ class _ProgressScreenState extends State<ProgressScreen> {
           children: [
             Text(AppLanguage.t('Your Journey', 'رحلتك'),
                 style: serif(28, w: FontWeight.bold)),
+            if (entitlementFuture != null) ...[
+              const SizedBox(height: 14),
+              _accountPlanCard(entitlementFuture!),
+            ],
             const SizedBox(height: 20),
             const Icon(Icons.menu_book_rounded, size: 64, color: C.gold),
             const SizedBox(height: 12),
-            Text(
-              AppLanguage.t(
-                'Your reading progress will appear here once bookmarks and revision tracking are enabled.',
-                'سيظهر تقدم القراءة هنا عند تفعيل العلامات وتتبع المراجعة.',
-              ),
-              textAlign: TextAlign.center,
-              style: TextStyle(color: C.cream),
-            ),
+            if (progressFuture == null)
+              Text(
+                'Account services are not configured for this build.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: C.cream.withOpacity(0.75)),
+              )
+            else
+              _progressList(progressFuture!),
             const SizedBox(height: 20),
             Text(AppLanguage.t('HifzAI Plans', 'خطط HifzAI'),
                 style: serif(24, w: FontWeight.bold)),
             const SizedBox(height: 8),
             Text(
               AppLanguage.t(
-                'Core Quran reading is free. Paid features are being built and are not available to buy yet.',
-                'قراءة القرآن الأساسية مجانية. الميزات المدفوعة قيد التطوير وغير متاحة للشراء حالياً.',
+                'Core Quran reading is free. Paid checkout is disabled while the service is being tested. One-time access periods will not renew automatically.',
+                'قراءة القرآن الأساسية مجانية. الدفع معطل أثناء اختبار الخدمة. فترات الوصول المدفوعة لا تتجدد تلقائياً.',
               ),
               textAlign: TextAlign.center,
               style: TextStyle(color: C.cream.withOpacity(0.7)),
@@ -1589,13 +2358,14 @@ class _ProgressScreenState extends State<ProgressScreen> {
                     'واجهة بالإنجليزية والعربية'),
                 AppLanguage.t('No ads in the current app',
                     'لا توجد إعلانات في التطبيق حالياً'),
-                AppLanguage.t('Planned: up to 3 AI recitation checks per day',
-                    'مخطط: حتى 3 فحوص للتلاوة بالذكاء الاصطناعي يومياً'),
                 AppLanguage.t(
-                    'Planned: basic Hifz tracking, limited history, and revision tools',
-                    'مخطط: تتبع أساسي للحفظ وسجل محدود وأدوات للمراجعة'),
-                AppLanguage.t('AI recitation checks are not available yet',
-                    'فحص التلاوة بالذكاء الاصطناعي غير متاح بعد'),
+                    'Up to 3 estimated transcript comparisons per UTC day when recitation service is available',
+                    'حتى 3 مقارنات تقديرية للنص يومياً بالتوقيت العالمي عند توفر خدمة التلاوة'),
+                AppLanguage.t(
+                    'Saved self-guided ayah recall and revision status',
+                    'حفظ نتيجة استرجاع الآية ذاتياً وحالة المراجعة'),
+                AppLanguage.t('Recitation service is not currently enabled',
+                    'خدمة التلاوة غير مفعّلة حالياً'),
               ],
             ),
             const SizedBox(height: 12),
@@ -1603,21 +2373,25 @@ class _ProgressScreenState extends State<ProgressScreen> {
               title: AppLanguage.t('HifzAI Plus', 'HifzAI بلس'),
               price: 'R199',
               period: AppLanguage.t(
-                'per month • R1,499 per year (about R125/month)',
-                'شهرياً • 1,499 راند سنوياً (حوالي 125 راند شهرياً)',
+                'one-time one-month access • R1,499 one-time for 12 months',
+                'دفع لمرة واحدة لشهر • 1,499 راند لمرة واحدة لمدة 12 شهراً',
               ),
               status: AppLanguage.t(
-                'Coming soon — recommended for focused learners',
-                'قريباً — موصى به للمتعلمين الجادين',
+                paidCheckoutEnabled
+                    ? 'Available • one-time access, no auto-renewal'
+                    : 'Coming soon',
+                paidCheckoutEnabled
+                    ? 'متاح • وصول بدفع لمرة واحدة دون تجديد تلقائي'
+                    : 'قريباً',
               ),
               badge: AppLanguage.t('Recommended', 'موصى به'),
               features: [
                 AppLanguage.t(
-                    'Planned: up to 50 AI recitation checks per month',
+                    'Up to 50 estimated transcript comparisons per UTC month',
                     'مخطط: حتى 50 فحص تلاوة بالذكاء الاصطناعي شهرياً'),
                 AppLanguage.t(
-                    'Planned: advanced Tajweed feedback and missing/wrong-word detection',
-                    'مخطط: ملاحظات متقدمة للتجويد واكتشاف الكلمات الناقصة أو الخاطئة'),
+                    'Word-level transcript comparison is approximate, not advanced Tajweed grading',
+                    'مقارنة الكلمات تقديرية وليست تقييماً متقدماً للتجويد'),
                 AppLanguage.t(
                     'Planned: madd timing, ghunnah, qalqalah, ikhfa, and idgham feedback',
                     'مخطط: ملاحظات للمد والغنة والقلقلة والإخفاء والإدغام'),
@@ -1632,13 +2406,30 @@ class _ProgressScreenState extends State<ProgressScreen> {
                     'مخطط: سجل التقدم والمعلّم الذكي الأساسي وبدون إعلانات'),
               ],
               highlighted: true,
+              choices: paidCheckoutEnabled
+                  ? const [
+                      MapEntry('R199 • one month', 'plus_monthly'),
+                      MapEntry('R1,499 • 12 months', 'plus_yearly'),
+                    ]
+                  : const [],
+              onChoose: _startCheckout,
+              checkoutInProgress: startingCheckout,
             ),
             const SizedBox(height: 20),
             _planCard(
               title: AppLanguage.t('HifzAI Pro', 'HifzAI برو'),
               price: 'R299',
-              period: AppLanguage.t('per month', 'شهرياً'),
-              status: AppLanguage.t('Coming soon', 'قريباً'),
+              period: AppLanguage.t(
+                  'one-time one-month access, no automatic renewal',
+                  'دفع لمرة واحدة لشهر دون تجديد تلقائي'),
+              status: AppLanguage.t(
+                paidCheckoutEnabled
+                    ? 'Available • one-time access, no auto-renewal'
+                    : 'Coming soon',
+                paidCheckoutEnabled
+                    ? 'متاح • وصول بدفع لمرة واحدة دون تجديد تلقائي'
+                    : 'قريباً',
+              ),
               features: [
                 AppLanguage.t(
                     'Planned: up to 150 AI recitation checks per month',
@@ -1658,6 +2449,11 @@ class _ProgressScreenState extends State<ProgressScreen> {
                     'Planned: detailed performance reports, priority new features, and no ads',
                     'مخطط: تقارير أداء مفصلة وأولوية الميزات الجديدة وبدون إعلانات'),
               ],
+              choices: paidCheckoutEnabled
+                  ? const [MapEntry('R299 • one month', 'pro_monthly')]
+                  : const [],
+              onChoose: _startCheckout,
+              checkoutInProgress: startingCheckout,
             ),
             const SizedBox(height: 20),
             Text(
@@ -1672,6 +2468,128 @@ class _ProgressScreenState extends State<ProgressScreen> {
         ),
       );
 
+  Future<void> _startCheckout(String plan) async {
+    if (startingCheckout) return;
+    setState(() => startingCheckout = true);
+    try {
+      await PaymentService.launchCheckout(plan);
+    } catch (checkoutError) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Checkout could not start: $checkoutError')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => startingCheckout = false);
+    }
+  }
+
+  Widget _progressList(Future<List<Map<String, dynamic>>> future) =>
+      FutureBuilder<List<Map<String, dynamic>>>(
+        future: future,
+        builder: (context, snapshot) {
+          if (snapshot.hasError) {
+            return Text('Could not load saved progress: ${snapshot.error}',
+                style: const TextStyle(color: C.goldLight));
+          }
+          if (snapshot.connectionState != ConnectionState.done) {
+            return const Center(
+                child: CircularProgressIndicator(color: C.gold));
+          }
+          final rows = snapshot.data ?? const <Map<String, dynamic>>[];
+          if (rows.isEmpty) {
+            return Text(
+              'Complete a self-guided ayah test to begin saving your progress.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: C.cream.withOpacity(0.75)),
+            );
+          }
+          final remembered =
+              rows.where((row) => row['status'] == 'remembered').length;
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '$remembered remembered • ${rows.length - remembered} to revise',
+                style: const TextStyle(color: C.goldLight),
+              ),
+              const SizedBox(height: 8),
+              ...rows.map((row) {
+                final surahId = row['surah_id'] as int;
+                final ayahNumber = row['ayah_number'] as int;
+                final surah = D.surahs.where((item) => item.id == surahId);
+                final surahName =
+                    surah.isEmpty ? 'Surah $surahId' : surah.first.name;
+                final needsRevision = row['status'] == 'needs_revision';
+                return ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(
+                    needsRevision
+                        ? Icons.replay_rounded
+                        : Icons.check_circle_outline_rounded,
+                    color: C.goldLight,
+                  ),
+                  title: Text('$surahName • Ayah $ayahNumber'),
+                  subtitle: Text(
+                    needsRevision ? 'Needs revision' : 'Remembered',
+                    style: TextStyle(color: C.cream.withOpacity(0.7)),
+                  ),
+                );
+              }),
+              TextButton.icon(
+                onPressed: () => setState(
+                    () => progressFuture = PaymentService.getAyahProgress()),
+                icon: const Icon(Icons.refresh_rounded),
+                label: const Text('Refresh progress'),
+              ),
+            ],
+          );
+        },
+      );
+
+  Widget _accountPlanCard(Future<Map<String, dynamic>> future) =>
+      FutureBuilder<Map<String, dynamic>>(
+        future: future,
+        builder: (context, snapshot) {
+          final data = snapshot.data;
+          final expiresAt = data?['expiresAt'] as String?;
+          final expiry =
+              expiresAt == null ? null : DateTime.tryParse(expiresAt);
+          final plan = data?['plan'] as String?;
+          final message = snapshot.hasError
+              ? 'Could not load saved plan: ${snapshot.error}'
+              : snapshot.connectionState != ConnectionState.done
+                  ? 'Loading your saved access…'
+                  : plan == 'free'
+                      ? 'Your account is on the Free plan.'
+                      : 'Your ${plan?.toUpperCase()} access is saved until '
+                          '${expiry?.toLocal().toString().split(' ').first ?? 'the expiry date'}.';
+          return Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: C.emerald.withOpacity(0.6),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: C.gold.withOpacity(0.4)),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.verified_user_outlined, color: C.goldLight),
+                const SizedBox(width: 12),
+                Expanded(
+                    child:
+                        Text(message, style: const TextStyle(color: C.cream))),
+                IconButton(
+                  tooltip: 'Refresh plan status',
+                  onPressed: () => setState(() =>
+                      entitlementFuture = PaymentService.getEntitlement()),
+                  icon: const Icon(Icons.refresh_rounded, color: C.goldLight),
+                ),
+              ],
+            ),
+          );
+        },
+      );
+
   static Widget _planCard({
     required String title,
     required String price,
@@ -1680,6 +2598,9 @@ class _ProgressScreenState extends State<ProgressScreen> {
     required List<String> features,
     String? badge,
     bool highlighted = false,
+    List<MapEntry<String, String>> choices = const [],
+    void Function(String plan)? onChoose,
+    bool checkoutInProgress = false,
   }) {
     return Container(
       padding: const EdgeInsets.all(16),
@@ -1749,6 +2670,30 @@ class _ProgressScreenState extends State<ProgressScreen> {
                         ],
                       ),
                     )),
+                if (choices.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 14),
+                    child: Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: choices
+                          .map(
+                            (choice) => OutlinedButton(
+                              onPressed: checkoutInProgress || onChoose == null
+                                  ? null
+                                  : () => onChoose(choice.value),
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: C.goldLight,
+                                side: const BorderSide(color: C.gold),
+                              ),
+                              child: Text(
+                                checkoutInProgress ? 'Opening…' : choice.key,
+                              ),
+                            ),
+                          )
+                          .toList(),
+                    ),
+                  ),
               ],
             ),
           ),
@@ -1761,7 +2706,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
 class GoldButton extends StatelessWidget {
   final String label;
   final IconData icon;
-  final VoidCallback onPressed;
+  final VoidCallback? onPressed;
 
   const GoldButton(
       {super.key,
