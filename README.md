@@ -4,17 +4,19 @@ HifzAI is a Quran reading and memorisation companion built with Flutter.
 
 ## Features
 
-- Live Uthmani Quran text from the AlQuran Cloud API
+- Complete 114-Surah, 6,236-ayah Uthmani Quran bundled for offline reading
 - Surah browsing and a self-guided memorisation test
 - Bilingual English/Arabic interface and Tajweed learning guide
 - Email/password accounts with Supabase Auth
 - Consent-based short recitation recording and approximate transcript comparison
 - Server-side plan periods and recitation usage quotas
 
-The recitation tool compares an Arabic speech transcript with the selected ayah. It
-is an estimate, not a Tajweed assessment or religious ruling. Payment checkout is
-currently disabled. Yoco charges are one-time: paid access lasts one or twelve
-calendar months and does not renew automatically.
+The memorisation quiz asks learners to choose the next ayah from four choices,
+using the complete Quran text stored in the app. The recitation tool compares an
+Arabic speech transcript with the selected ayah. It is an estimate, not a Tajweed
+assessment or religious ruling. Payment checkout is currently disabled. Yoco
+charges are one-time: paid access lasts one or twelve calendar months and does not
+renew automatically.
 
 ## Support and privacy
 
@@ -61,10 +63,15 @@ Keep both `PAID_PLANS_ENABLED` and `RECITATION_ENABLED` disabled until the schem
 test checkout flow, provider settings, and full release have been verified. A
 success redirect alone is never proof of payment.
 
-## Quran text service
+## Quran text and attribution
 
-Quran text is requested from `https://api.alquran.cloud`. Review the provider's
-terms and attribution requirements before production distribution.
+The bundled Arabic verse text uses Quran.com's Uthmani script API
+(`https://api.quran.com`) and includes all 114 chapter records and 6,236 keyed
+verses. It is included locally so Surah reading and the quiz work without a
+Quran-text network request. Recitation comparison still requires internet access.
+The server uses AlQuran Cloud as a separate live reference during recitation
+comparison. Review the text providers' reuse terms and attribution requirements
+before production distribution.
 
 ## License
 

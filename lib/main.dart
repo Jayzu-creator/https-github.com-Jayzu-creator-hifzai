@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -10,6 +11,7 @@ import 'package:record/record.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:flutter/services.dart';
 
 const supabaseUrl = String.fromEnvironment('SUPABASE_URL');
 const supabaseAnonKey = String.fromEnvironment('SUPABASE_ANON_KEY');
@@ -17,10 +19,37 @@ const paidCheckoutEnabled = bool.fromEnvironment('ENABLE_PAID_CHECKOUT');
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  try {
+    await QuranService.load();
+  } catch (error) {
+    runApp(QuranDataErrorApp(error: error));
+    return;
+  }
   if (supabaseUrl.isNotEmpty && supabaseAnonKey.isNotEmpty) {
     await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
   }
   runApp(const HifzAIApp());
+}
+
+class QuranDataErrorApp extends StatelessWidget {
+  final Object error;
+
+  const QuranDataErrorApp({super.key, required this.error});
+
+  @override
+  Widget build(BuildContext context) => MaterialApp(
+        home: Scaffold(
+          body: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Text(
+                'The bundled Quran text could not be loaded. Please reinstall or update HifzAI.\n\n$error',
+                textAlign: TextAlign.center,
+              ),
+            ),
+          ),
+        ),
+      );
 }
 
 class C {
@@ -65,18 +94,7 @@ class Surah {
 }
 
 class D {
-  static const surahs = [
-    Surah(1, 'Al-Fatiha', 'الفاتحة', 7),
-    Surah(2, 'Al-Ikhlas', 'الإخلاص', 4),
-    Surah(3, 'Al-Falaq', 'الفلق', 5),
-    Surah(4, 'An-Nas', 'الناس', 6),
-    Surah(5, 'Al-Kawthar', 'الكوثر', 3),
-    Surah(6, 'Al-Asr', 'العصر', 3),
-    Surah(7, 'Ad-Duhaa', 'الضحى', 11),
-    Surah(8, 'Al-Mulk', 'الملك', 30),
-    Surah(9, 'Ya-Sin', 'يس', 83),
-    Surah(10, 'Al-Kahf', 'الكهف', 110),
-  ];
+  static List<Surah> surahs = [];
 
   static String ayahOfDay() {
     const values = [
@@ -91,36 +109,146 @@ class D {
 }
 
 class QuranAyah {
+  final int surahId;
   final int number;
   final String text;
 
-  const QuranAyah({required this.number, required this.text});
+  const QuranAyah({
+    required this.surahId,
+    required this.number,
+    required this.text,
+  });
+}
+
+class QuranQuizQuestion {
+  final QuranAyah prompt;
+  final QuranAyah answer;
+  final List<QuranAyah> choices;
+
+  const QuranQuizQuestion({
+    required this.prompt,
+    required this.answer,
+    required this.choices,
+  });
 }
 
 class QuranService {
-  static Future<List<QuranAyah>> fetchSurah(int id) async {
-    final response = await http.get(
-      Uri.parse('https://api.alquran.cloud/v1/surah/$id/quran-uthmani'),
-      headers: const {'Accept': 'application/json'},
+  static Map<int, List<QuranAyah>> _ayahsBySurah = const {};
+  static List<QuranAyah> _allAyahs = const [];
+
+  static Future<void> load() async {
+    final source =
+        await rootBundle.loadString('assets/quran/quran-uthmani.json');
+    final json = jsonDecode(source) as Map<String, dynamic>;
+    final rawSurahs = json['surahs'];
+    if (rawSurahs is! List || rawSurahs.length != 114) {
+      throw const FormatException('The Quran asset must contain 114 Surahs.');
+    }
+
+    final surahs = <Surah>[];
+    final ayahsBySurah = <int, List<QuranAyah>>{};
+    final allAyahs = <QuranAyah>[];
+    for (final rawSurah in rawSurahs) {
+      final item = rawSurah as Map<String, dynamic>;
+      final id = item['number'] as int;
+      final arabicName = item['arabicName'] as String;
+      final englishName = item['englishName'] as String;
+      final rawAyahs = item['ayahs'] as List<dynamic>;
+      final ayahs = rawAyahs.map((rawAyah) {
+        final ayah = rawAyah as Map<String, dynamic>;
+        final text = ayah['text'] as String;
+        if (text.trim().isEmpty) {
+          throw FormatException('Surah $id contains an empty ayah.');
+        }
+        return QuranAyah(
+          surahId: id,
+          number: ayah['number'] as int,
+          text: text,
+        );
+      }).toList(growable: false);
+      if (ayahs.isEmpty) throw FormatException('Surah $id has no ayahs.');
+      surahs.add(Surah(id, englishName, arabicName, ayahs.length));
+      ayahsBySurah[id] = ayahs;
+      allAyahs.addAll(ayahs);
+    }
+    if (allAyahs.length != 6236) {
+      throw FormatException(
+          'The Quran asset must contain 6236 ayahs, found ${allAyahs.length}.');
+    }
+    D.surahs = List.unmodifiable(surahs);
+    _ayahsBySurah = Map.unmodifiable(ayahsBySurah);
+    _allAyahs = List.unmodifiable(allAyahs);
+  }
+
+  static List<QuranAyah> get allAyahs => _allAyahs;
+
+  static bool isCorrectAnswer(QuranQuizQuestion question, int choiceIndex) {
+    if (choiceIndex < 0 || choiceIndex >= question.choices.length) {
+      throw RangeError.index(choiceIndex, question.choices);
+    }
+    final choice = question.choices[choiceIndex];
+    return choice.surahId == question.answer.surahId &&
+        choice.number == question.answer.number;
+  }
+
+  static Future<List<QuranAyah>> fetchSurah(int id) {
+    final ayahs = _ayahsBySurah[id];
+    if (ayahs == null) throw ArgumentError.value(id, 'id', 'Unknown Surah');
+    return Future.value(ayahs);
+  }
+
+  static QuranQuizQuestion createNextAyahQuestion(
+    int? surahId, {
+    Random? random,
+  }) {
+    if (_allAyahs.length != 6236) {
+      throw StateError(
+          'The bundled Quran must be loaded before making a quiz.');
+    }
+    final generator = random ?? Random();
+    final questionPool = surahId == null
+        ? _allAyahs
+        : _ayahsBySurah[surahId] ?? const <QuranAyah>[];
+    if (questionPool.length < 2) {
+      throw ArgumentError.value(
+          surahId, 'surahId', 'Not enough ayahs to quiz.');
+    }
+    final promptIndex = generator.nextInt(questionPool.length - 1);
+    final prompt = questionPool[promptIndex];
+    final answer = questionPool[promptIndex + 1];
+    final excluded = {
+      '${prompt.surahId}:${prompt.number}',
+      '${answer.surahId}:${answer.number}',
+    };
+    bool isExcluded(QuranAyah ayah) =>
+        excluded.contains('${ayah.surahId}:${ayah.number}') ||
+        ayah.text == prompt.text ||
+        ayah.text == answer.text;
+    final localDistractors = questionPool
+        .where((ayah) => !isExcluded(ayah))
+        .toList()
+      ..shuffle(generator);
+    final localKeys = localDistractors
+        .map((ayah) => '${ayah.surahId}:${ayah.number}')
+        .toSet();
+    final remainingDistractors = _allAyahs
+        .where((ayah) => !isExcluded(ayah))
+        .where((ayah) => !localKeys.contains('${ayah.surahId}:${ayah.number}'))
+        .toList()
+      ..shuffle(generator);
+    final choices = <QuranAyah>[
+      answer,
+      ...localDistractors.take(3),
+      ...remainingDistractors.take(3 - min(3, localDistractors.length)),
+    ]..shuffle(generator);
+    if (choices.length != 4) {
+      throw StateError('Could not create four unique Quran answer choices.');
+    }
+    return QuranQuizQuestion(
+      prompt: prompt,
+      answer: answer,
+      choices: List.unmodifiable(choices),
     );
-    if (response.statusCode != 200) {
-      throw Exception('Quran service returned HTTP ${response.statusCode}.');
-    }
-
-    final json = jsonDecode(response.body) as Map<String, dynamic>;
-    if (json['code'] != 200) {
-      throw Exception('Quran service returned an invalid response.');
-    }
-
-    final data = json['data'] as Map<String, dynamic>;
-    final ayahs = data['ayahs'] as List<dynamic>;
-    return ayahs.map((ayah) {
-      final item = ayah as Map<String, dynamic>;
-      return QuranAyah(
-        number: item['numberInSurah'] as int,
-        text: item['text'] as String,
-      );
-    }).toList(growable: false);
   }
 }
 
@@ -584,7 +712,7 @@ class PaymentReturnGate extends StatelessWidget {
         paymentResult == 'failed') {
       return PaymentReturnScreen(result: paymentResult!);
     }
-    return const WifiGate(child: SplashScreen());
+    return const SplashScreen();
   }
 }
 
@@ -740,8 +868,7 @@ class _PaymentReturnScreenState extends State<PaymentReturnScreen> {
                   const SizedBox(height: 10),
                   OutlinedButton(
                     onPressed: () => Navigator.of(context).pushAndRemoveUntil(
-                      MaterialPageRoute(
-                          builder: (_) => const WifiGate(child: MainShell())),
+                      MaterialPageRoute(builder: (_) => const MainShell()),
                       (_) => false,
                     ),
                     child: Text(
@@ -976,7 +1103,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       icon: Icons.fact_check_rounded,
       title: 'Hifz Examination',
       desc:
-          'Memorisation tests like a real examiner — “Continue from Ayah 12.” No mushaf, no hints.'
+          'Practice what comes next with four ayah choices from any Surah or the whole Quran.'
     ),
     (
       icon: Icons.workspace_premium_rounded,
@@ -1401,6 +1528,23 @@ class _SurahScreenState extends State<SurahScreen> {
     setState(() => ayahs = QuranService.fetchSurah(widget.surah.id));
   }
 
+  Future<void> openQuranSource() async {
+    try {
+      final opened = await launchUrl(Uri.parse('https://quran.com'));
+      if (!opened && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not open Quran.com.')),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not open Quran.com: $error')),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -1441,11 +1585,11 @@ class _SurahScreenState extends State<SurahScreen> {
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            const Icon(Icons.cloud_off_rounded,
+                            const Icon(Icons.menu_book_rounded,
                                 color: C.goldLight, size: 48),
                             const SizedBox(height: 12),
-                            Text(
-                              'The Quran text could not be loaded. Check your internet connection and try again.',
+                            const Text(
+                              'The bundled Quran text could not be loaded. Please update or reinstall HifzAI.',
                               textAlign: TextAlign.center,
                               style: TextStyle(color: C.cream),
                             ),
@@ -1461,43 +1605,55 @@ class _SurahScreenState extends State<SurahScreen> {
                   }
 
                   final loadedAyahs = snapshot.data ?? const <QuranAyah>[];
-                  return ListView.builder(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    itemCount: loadedAyahs.length,
-                    itemBuilder: (_, index) {
-                      final ayah = loadedAyahs[index];
-                      return Container(
-                        margin: const EdgeInsets.only(bottom: 10),
-                        padding: const EdgeInsets.all(16),
-                        decoration: BoxDecoration(
-                          color: C.emerald.withOpacity(0.45),
-                          borderRadius: BorderRadius.circular(14),
-                        ),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            CircleAvatar(
-                              radius: 14,
-                              backgroundColor: C.goldLight,
-                              child: Text('${ayah.number}',
-                                  style: const TextStyle(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.bold,
-                                      color: C.emeraldDark)),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Text(
-                                ayah.text,
-                                textAlign: TextAlign.right,
-                                textDirection: TextDirection.rtl,
-                                style: const TextStyle(fontSize: 25, height: 2),
+                  return Column(
+                    children: [
+                      Expanded(
+                        child: ListView.builder(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          itemCount: loadedAyahs.length,
+                          itemBuilder: (_, index) {
+                            final ayah = loadedAyahs[index];
+                            return Container(
+                              margin: const EdgeInsets.only(bottom: 10),
+                              padding: const EdgeInsets.all(16),
+                              decoration: BoxDecoration(
+                                color: C.emerald.withOpacity(0.45),
+                                borderRadius: BorderRadius.circular(14),
                               ),
-                            ),
-                          ],
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  CircleAvatar(
+                                    radius: 14,
+                                    backgroundColor: C.goldLight,
+                                    child: Text('${ayah.number}',
+                                        style: const TextStyle(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.bold,
+                                            color: C.emeraldDark)),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Text(
+                                      ayah.text,
+                                      textAlign: TextAlign.right,
+                                      textDirection: TextDirection.rtl,
+                                      style: const TextStyle(
+                                          fontSize: 25, height: 2),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
                         ),
-                      );
-                    },
+                      ),
+                      TextButton.icon(
+                        onPressed: openQuranSource,
+                        icon: const Icon(Icons.open_in_new_rounded, size: 16),
+                        label: const Text('Uthmani Arabic text: Quran.com'),
+                      ),
+                    ],
                   );
                 },
               ),
@@ -1528,8 +1684,8 @@ class ExaminerScreen extends StatelessWidget {
           Center(
             child: Text(
               AppLanguage.t(
-                'The mushaf is hidden. Recite from memory — exactly like a real examination.',
-                'المصحف مخفي. اقرأ من حفظك كما في الاختبار الحقيقي.',
+                'Recall the next ayah by choosing from four Quran verses. Test any Surah or the whole Quran.',
+                'استرجع الآية التالية باختيارها من أربعة خيارات. اختبر أي سورة أو القرآن كاملاً.',
               ),
               textAlign: TextAlign.center,
               style: TextStyle(color: C.cream.withOpacity(0.8)),
@@ -1540,8 +1696,8 @@ class ExaminerScreen extends StatelessWidget {
               Icons.menu_book_rounded,
               AppLanguage.t('Read every Surah', 'اقرأ كل السور'),
               AppLanguage.t(
-                  'Open any Surah from Home and read the complete live Quran text.',
-                  'افتح أي سورة من الرئيسية واقرأ نص القرآن كاملاً.')),
+                  'Open any of the 114 Surahs from Home. The complete Uthmani Quran is stored on your device.',
+                  'افتح أي سورة من السور الـ114 من الرئيسية. القرآن العثماني كاملاً مخزن على جهازك.')),
           _feature(
               Icons.mic_none_rounded,
               AppLanguage.t('Recitation checking', 'فحص التلاوة'),
@@ -1982,162 +2138,225 @@ class MemorisationTestScreen extends StatefulWidget {
 }
 
 class _MemorisationTestScreenState extends State<MemorisationTestScreen> {
-  Surah selectedSurah = D.surahs.first;
-  Future<List<QuranAyah>>? ayahs;
-  int ayahIndex = 0;
-  bool answerVisible = false;
+  static const questionCount = 10;
+
+  int selectedSurahId = 0;
+  QuranQuizQuestion? question;
+  int questionNumber = 0;
+  int? selectedChoice;
   int correct = 0;
-  int needsRevision = 0;
+  bool answered = false;
+  bool complete = false;
 
   void startTest() {
     setState(() {
-      ayahs = QuranService.fetchSurah(selectedSurah.id);
-      ayahIndex = 0;
-      answerVisible = false;
+      question = _newQuestion();
+      questionNumber = 1;
+      selectedChoice = null;
       correct = 0;
-      needsRevision = 0;
+      answered = false;
+      complete = false;
     });
   }
 
-  void mark(bool wasCorrect, List<QuranAyah> loadedAyahs) {
-    final ayah = loadedAyahs[ayahIndex];
+  QuranQuizQuestion _newQuestion() => QuranService.createNextAyahQuestion(
+      selectedSurahId == 0 ? null : selectedSurahId);
+
+  void checkAnswer() {
+    final current = question;
+    final choice = selectedChoice;
+    if (current == null || choice == null || answered) return;
+    final isCorrect = QuranService.isCorrectAnswer(current, choice);
     setState(() {
-      if (wasCorrect) {
-        correct++;
-      } else {
-        needsRevision++;
-      }
-      answerVisible = false;
-      if (ayahIndex < loadedAyahs.length - 1) {
-        ayahIndex++;
-      } else {
-        ayahs = null;
-      }
+      answered = true;
+      if (isCorrect) correct++;
     });
-    PaymentService.saveAyahProgress(
-      surahId: selectedSurah.id,
-      ayahNumber: ayah.number,
-      remembered: wasCorrect,
-    ).catchError((Object saveError) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Progress could not be saved: $saveError')),
-        );
-      }
+    if (supabaseUrl.isNotEmpty && supabaseAnonKey.isNotEmpty) {
+      PaymentService.saveAyahProgress(
+        surahId: current.answer.surahId,
+        ayahNumber: current.answer.number,
+        remembered: isCorrect,
+      ).catchError((Object saveError) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Progress could not be saved: $saveError')),
+          );
+        }
+      });
+    }
+  }
+
+  void continueTest() {
+    if (questionNumber == questionCount) {
+      setState(() => complete = true);
+      return;
+    }
+    setState(() {
+      question = _newQuestion();
+      questionNumber++;
+      selectedChoice = null;
+      answered = false;
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    final loaded = ayahs;
+    final current = question;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Memorisation Test'),
+        title: const Text('Quran Memory Quiz'),
         backgroundColor: C.emeraldDark,
         foregroundColor: C.cream,
       ),
       body: ListView(
         padding: const EdgeInsets.all(20),
         children: [
-          Text('Test yourself', style: serif(28, w: FontWeight.bold)),
+          Text('What comes next?', style: serif(28, w: FontWeight.bold)),
           const SizedBox(height: 8),
           Text(
-            'Choose a Surah, recite from memory, then reveal the ayah to check yourself.',
+            'Read the ayah, recall what follows, and choose the next ayah from four options. Questions use the complete bundled Quran.',
             style: TextStyle(color: C.cream.withOpacity(0.75)),
           ),
           const SizedBox(height: 20),
-          DropdownButtonFormField<Surah>(
-            value: selectedSurah,
+          DropdownButtonFormField<int>(
+            value: selectedSurahId,
             decoration: const InputDecoration(labelText: 'Surah'),
-            items: D.surahs
-                .map((surah) =>
-                    DropdownMenuItem(value: surah, child: Text(surah.name)))
-                .toList(),
-            onChanged: (surah) {
-              if (surah != null) setState(() => selectedSurah = surah);
-            },
+            items: [
+              const DropdownMenuItem(
+                  value: 0, child: Text('Whole Quran (random)')),
+              ...D.surahs.map(
+                (surah) => DropdownMenuItem(
+                  value: surah.id,
+                  child: Text('${surah.id}. ${surah.name}'),
+                ),
+              ),
+            ],
+            onChanged: question != null
+                ? null
+                : (surahId) {
+                    if (surahId != null) {
+                      setState(() => selectedSurahId = surahId);
+                    }
+                  },
           ),
           const SizedBox(height: 14),
-          GoldButton(
-              label: 'Load Test',
-              icon: Icons.download_rounded,
-              onPressed: startTest),
-          if (loaded != null) ...[
-            const SizedBox(height: 24),
-            FutureBuilder<List<QuranAyah>>(
-              future: loaded,
-              builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting) {
-                  return const Center(
-                      child: CircularProgressIndicator(color: C.gold));
-                }
-                if (snapshot.hasError) {
-                  return const Text(
-                    'The test could not be loaded. Check your connection and try again.',
+          if (current == null)
+            GoldButton(
+              label: 'Start 10-question quiz',
+              icon: Icons.play_arrow_rounded,
+              onPressed: startTest,
+            )
+          else if (complete)
+            _result()
+          else ...[
+            Text(
+              'Question $questionNumber of $questionCount • $correct correct',
+              style: const TextStyle(color: C.goldLight),
+            ),
+            const SizedBox(height: 14),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: C.emerald.withOpacity(0.55),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    '${D.surahs[current.prompt.surahId - 1].name} • '
+                    'Ayah ${current.prompt.number}',
                     textAlign: TextAlign.center,
-                    style: TextStyle(color: C.cream),
-                  );
-                }
-                final items = snapshot.data ?? const <QuranAyah>[];
-                if (items.isEmpty || ayahIndex >= items.length) {
-                  return _result();
-                }
-                final ayah = items[ayahIndex];
-                return Column(
-                  children: [
-                    Text(
-                      'Ayah ${ayah.number} of ${items.length}',
-                      style: TextStyle(color: C.goldLight.withOpacity(0.9)),
-                    ),
-                    const SizedBox(height: 18),
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(20),
-                      decoration: BoxDecoration(
-                        color: C.emerald.withOpacity(0.55),
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      child: answerVisible
-                          ? Text(
-                              ayah.text,
-                              textAlign: TextAlign.right,
-                              textDirection: TextDirection.rtl,
-                              style: const TextStyle(fontSize: 25, height: 2),
-                            )
-                          : const Text(
-                              'Recite this ayah from memory, then reveal the answer.',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(color: C.cream, height: 1.5),
-                            ),
-                    ),
-                    const SizedBox(height: 14),
-                    if (!answerVisible)
-                      OutlinedButton.icon(
-                        onPressed: () => setState(() => answerVisible = true),
-                        icon: const Icon(Icons.visibility_rounded),
-                        label: const Text('Reveal Ayah'),
-                      )
-                    else
-                      Row(
-                        children: [
-                          Expanded(
-                            child: OutlinedButton(
-                              onPressed: () => mark(false, items),
-                              child: const Text('Needs revision'),
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: FilledButton(
-                              onPressed: () => mark(true, items),
-                              child: const Text('I remembered it'),
-                            ),
-                          ),
-                        ],
-                      ),
-                  ],
-                );
-              },
+                    style: const TextStyle(color: C.goldLight),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    current.prompt.text,
+                    textAlign: TextAlign.center,
+                    textDirection: TextDirection.rtl,
+                    style: const TextStyle(fontSize: 25, height: 2),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 14),
+            const Text(
+              'Which ayah comes immediately after this one?',
+              style: TextStyle(color: C.cream, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            ...current.choices.indexed.map((entry) {
+              final index = entry.$1;
+              final ayah = entry.$2;
+              final isCorrect = ayah.surahId == current.answer.surahId &&
+                  ayah.number == current.answer.number;
+              final selected = selectedChoice == index;
+              final color = answered && isCorrect
+                  ? Colors.green
+                  : answered && selected
+                      ? Colors.redAccent
+                      : C.goldLight;
+              return Card(
+                color: answered && isCorrect
+                    ? Colors.green.withValues(alpha: 0.22)
+                    : answered && selected
+                        ? Colors.red.withValues(alpha: 0.22)
+                        : C.emerald.withOpacity(0.55),
+                child: RadioListTile<int>(
+                  value: index,
+                  groupValue: selectedChoice,
+                  activeColor: color,
+                  onChanged: answered
+                      ? null
+                      : (value) => setState(() => selectedChoice = value),
+                  title: Text(
+                    ayah.text,
+                    textDirection: TextDirection.rtl,
+                    style: const TextStyle(fontSize: 19, height: 1.8),
+                  ),
+                  subtitle: Text(
+                    '${D.surahs[ayah.surahId - 1].name} • Ayah ${ayah.number}',
+                    style: TextStyle(color: C.cream.withOpacity(0.65)),
+                  ),
+                ),
+              );
+            }),
+            if (answered)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Text(
+                  selectedChoice != null &&
+                          current.choices[selectedChoice!].surahId ==
+                              current.answer.surahId &&
+                          current.choices[selectedChoice!].number ==
+                              current.answer.number
+                      ? 'Correct — this is the next ayah.'
+                      : 'Not quite. The highlighted ayah is the next one.',
+                  style: TextStyle(
+                    color: selectedChoice != null &&
+                            current.choices[selectedChoice!].surahId ==
+                                current.answer.surahId &&
+                            current.choices[selectedChoice!].number ==
+                                current.answer.number
+                        ? Colors.greenAccent
+                        : C.goldLight,
+                  ),
+                ),
+              ),
+            GoldButton(
+              label: answered
+                  ? questionNumber == questionCount
+                      ? 'See your result'
+                      : 'Next question'
+                  : 'Check answer',
+              icon:
+                  answered ? Icons.arrow_forward_rounded : Icons.check_rounded,
+              onPressed: answered
+                  ? continueTest
+                  : selectedChoice == null
+                      ? null
+                      : checkAnswer,
             ),
           ],
         ],
@@ -2150,10 +2369,18 @@ class _MemorisationTestScreenState extends State<MemorisationTestScreen> {
       children: [
         const Icon(Icons.celebration_rounded, color: C.gold, size: 56),
         const SizedBox(height: 10),
-        Text('Test complete', style: serif(24, w: FontWeight.bold)),
+        Text('Quiz complete', style: serif(24, w: FontWeight.bold)),
         const SizedBox(height: 8),
-        Text('$correct remembered • $needsRevision to revise',
-            style: const TextStyle(color: C.cream)),
+        Text(
+          'You got $correct out of $questionCount correct.',
+          style: const TextStyle(color: C.cream),
+        ),
+        const SizedBox(height: 14),
+        GoldButton(
+          label: 'Try another quiz',
+          icon: Icons.refresh_rounded,
+          onPressed: startTest,
+        ),
       ],
     );
   }
@@ -2348,8 +2575,9 @@ class _ProgressScreenState extends State<ProgressScreen> {
               period: AppLanguage.t('Free forever', 'مجاني دائماً'),
               status: AppLanguage.t('Available now', 'متاح الآن'),
               features: [
-                AppLanguage.t('Live Quran text for the listed Surahs',
-                    'نص القرآن المباشر للسور المدرجة'),
+                AppLanguage.t(
+                    'The complete Uthmani Quran: all 114 Surahs, available offline',
+                    'القرآن العثماني كاملاً: 114 سورة، متاح دون اتصال'),
                 AppLanguage.t('Self-guided ayah recall test',
                     'اختبار ذاتي لاسترجاع الآيات'),
                 AppLanguage.t('Basic Tajweed learning guide',

@@ -32,9 +32,11 @@ not saved by HifzAI.
 
 ## Quran content and network access
 
-When a user opens a Surah, HifzAI requests Quran text from the AlQuran Cloud public
-API. The service may receive device/network information needed to respond. Please
-review that provider's terms and privacy policy.
+The full Uthmani Quran text is bundled in the app and reading or taking the
+memorisation quiz does not send Quran text requests over the network. When a
+recitation check is submitted, HifzAI's server requests the selected Surah from
+the AlQuran Cloud API as a reference. The provider receives the server's network
+request information, not the recording or the user's device network request.
 
 ## Data requests and account deletion
 

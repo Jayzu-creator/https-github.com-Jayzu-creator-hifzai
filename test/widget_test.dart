@@ -6,6 +6,83 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hifzai/main.dart';
 
 void main() {
+  setUpAll(QuranService.load);
+
+  test('bundles every Quran Surah and ayah locally', () async {
+    expect(D.surahs, hasLength(114));
+    expect(QuranService.allAyahs, hasLength(6236));
+    expect(D.surahs.first.name, 'Al-Fatihah');
+    expect(D.surahs.last.id, 114);
+    expect(QuranService.allAyahs[7].text.trim(), 'الٓمٓ');
+    expect(
+      RegExp(r'[\u0600-\u06FF]').hasMatch(QuranService.allAyahs.first.text),
+      isTrue,
+    );
+    final alBaqaraAyahs = await QuranService.fetchSurah(2);
+    expect(alBaqaraAyahs.first.surahId, 2);
+  });
+
+  test('next-ayah quiz creates four distinct Quran-valid options', () {
+    final question = QuranService.createNextAyahQuestion(1);
+    final correctChoices = question.choices
+        .where((ayah) =>
+            ayah.surahId == question.answer.surahId &&
+            ayah.number == question.answer.number)
+        .toList();
+
+    expect(question.prompt.surahId, 1);
+    expect(question.answer.surahId, 1);
+    expect(question.answer.number, question.prompt.number + 1);
+    expect(question.choices, hasLength(4));
+    expect(correctChoices, hasLength(1));
+    final answerIndex = question.choices.indexWhere(
+      (ayah) =>
+          ayah.surahId == question.answer.surahId &&
+          ayah.number == question.answer.number,
+    );
+    expect(QuranService.isCorrectAnswer(question, answerIndex), isTrue);
+    expect(
+      QuranService.isCorrectAnswer(question, (answerIndex + 1) % 4),
+      isFalse,
+    );
+    expect(
+      question.choices
+          .map((ayah) => '${ayah.surahId}:${ayah.number}')
+          .toSet(),
+      hasLength(4),
+    );
+    final wholeQuranQuestion = QuranService.createNextAyahQuestion(null);
+    final promptGlobalIndex = QuranService.allAyahs.indexWhere(
+      (ayah) =>
+          ayah.surahId == wholeQuranQuestion.prompt.surahId &&
+          ayah.number == wholeQuranQuestion.prompt.number,
+    );
+    final answerGlobalIndex = QuranService.allAyahs.indexWhere(
+      (ayah) =>
+          ayah.surahId == wholeQuranQuestion.answer.surahId &&
+          ayah.number == wholeQuranQuestion.answer.number,
+    );
+    expect(wholeQuranQuestion.choices, hasLength(4));
+    expect(answerGlobalIndex, promptGlobalIndex + 1);
+    expect(
+      wholeQuranQuestion.choices.map((ayah) => ayah.text).toSet(),
+      hasLength(4),
+    );
+  });
+
+  testWidgets('starts a four-choice Quran memory quiz', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(home: MemorisationTestScreen()),
+    );
+
+    await tester.tap(find.text('Start 10-question quiz'));
+    await tester.pump();
+
+    expect(find.text('Question 1 of 10 • 0 correct'), findsOneWidget);
+    expect(D.surahs, hasLength(114));
+    expect(find.text('Check answer'), findsNothing);
+  });
+
   test('wraps PCM samples in a valid WAV header', () {
     final wav = pcm16ToWav(Uint8List.fromList([1, 2, 3, 4]));
     final header = ByteData.sublistView(wav);
