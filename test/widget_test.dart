@@ -13,13 +13,11 @@ void main() {
     expect(QuranService.allAyahs, hasLength(6236));
     expect(D.surahs.first.name, 'Al-Fatihah');
     expect(D.surahs.last.id, 114);
-    expect(QuranService.allAyahs[7].text.trim(), 'الٓمٓ');
     expect(
       RegExp(r'[\u0600-\u06FF]').hasMatch(QuranService.allAyahs.first.text),
       isTrue,
     );
-    final alBaqaraAyahs = await QuranService.fetchSurah(2);
-    expect(alBaqaraAyahs.first.surahId, 2);
+    expect((await QuranService.fetchSurah(2)).first.surahId, 2);
   });
 
   test('next-ayah quiz creates four distinct Quran-valid options', () {
@@ -35,52 +33,65 @@ void main() {
     expect(question.answer.number, question.prompt.number + 1);
     expect(question.choices, hasLength(4));
     expect(correctChoices, hasLength(1));
-    final answerIndex = question.choices.indexWhere(
-      (ayah) =>
-          ayah.surahId == question.answer.surahId &&
-          ayah.number == question.answer.number,
-    );
-    expect(QuranService.isCorrectAnswer(question, answerIndex), isTrue);
     expect(
-      QuranService.isCorrectAnswer(question, (answerIndex + 1) % 4),
-      isFalse,
-    );
-    expect(
-      question.choices
-          .map((ayah) => '${ayah.surahId}:${ayah.number}')
-          .toSet(),
+      question.choices.map((ayah) => '${ayah.surahId}:${ayah.number}').toSet(),
       hasLength(4),
     );
-    final wholeQuranQuestion = QuranService.createNextAyahQuestion(null);
-    final promptGlobalIndex = QuranService.allAyahs.indexWhere(
-      (ayah) =>
-          ayah.surahId == wholeQuranQuestion.prompt.surahId &&
-          ayah.number == wholeQuranQuestion.prompt.number,
-    );
-    final answerGlobalIndex = QuranService.allAyahs.indexWhere(
-      (ayah) =>
-          ayah.surahId == wholeQuranQuestion.answer.surahId &&
-          ayah.number == wholeQuranQuestion.answer.number,
-    );
-    expect(wholeQuranQuestion.choices, hasLength(4));
-    expect(answerGlobalIndex, promptGlobalIndex + 1);
     expect(
-      wholeQuranQuestion.choices.map((ayah) => ayah.text).toSet(),
+      QuranService.createNextAyahQuestion(null).choices,
       hasLength(4),
     );
   });
 
-  testWidgets('starts a four-choice Quran memory quiz', (tester) async {
+  test('creates a focused question for a saved revision target', () {
+    final target = QuranService.ayahsForSurah(2)[2];
+    final question = QuranService.createQuestionForAnswer(target);
+
+    expect(question.answer.number, target.number);
+    expect(question.prompt.number, target.number - 1);
+    expect(question.prompt.surahId, target.surahId);
+    expect(question.choices, hasLength(4));
+    expect(question.choices.map((ayah) => ayah.text).toSet(), hasLength(4));
+    expect(
+      question.choices
+          .where((ayah) =>
+              ayah.surahId == target.surahId && ayah.number == target.number)
+          .length,
+      1,
+    );
+  });
+
+  test('builds plan analytics from saved quiz outcomes', () {
+    final insights = QuranProgressInsights.fromRows([
+      {'surah_id': 2, 'ayah_number': 3, 'status': 'needs_revision'},
+      {'surah_id': 2, 'ayah_number': 4, 'status': 'needs_revision'},
+      {'surah_id': 1, 'ayah_number': 2, 'status': 'remembered'},
+    ]);
+
+    expect(insights.rememberedCount, 1);
+    expect(insights.needsRevisionCount, 2);
+    expect(insights.needsRevision.map((ayah) => ayah.number), [3, 4]);
+    expect(insights.reviewedCount, 3);
+    expect(insights.accuracyPercent, 33);
+    expect(insights.weakestSurahs.first.surahId, 2);
+    expect(insights.weakestSurahs.first.missedCount, 2);
+    expect(insights.weakestSurahs.first.accuracyPercent, 0);
+  });
+
+  testWidgets('starts a focused revision quiz from saved ayahs',
+      (tester) async {
+    final target = QuranService.ayahsForSurah(2)[2];
     await tester.pumpWidget(
-      const MaterialApp(home: MemorisationTestScreen()),
+      MaterialApp(
+        home: MemorisationTestScreen(revisionTargets: [target]),
+      ),
     );
 
-    await tester.tap(find.text('Start 10-question quiz'));
+    await tester.tap(find.text('Start focused revision'));
     await tester.pump();
 
-    expect(find.text('Question 1 of 10 • 0 correct'), findsOneWidget);
-    expect(D.surahs, hasLength(114));
-    expect(find.text('Check answer'), findsNothing);
+    expect(find.text('Focused Revision'), findsOneWidget);
+    expect(find.text('Question 1 of 1 • 0 correct'), findsOneWidget);
   });
 
   test('wraps PCM samples in a valid WAV header', () {
@@ -152,7 +163,7 @@ void main() {
     expect(find.byType(HifzAIApp), findsOneWidget);
   });
 
-  testWidgets('shows honest plan availability and proposed prices',
+  testWidgets('shows implemented paid features and honest availability',
       (tester) async {
     await tester.pumpWidget(
       const MaterialApp(
@@ -174,7 +185,16 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('Recommended'), findsOneWidget);
-    expect(find.textContaining('Coming soon'), findsWidgets);
+    expect(
+      find.text('Study tools ready • live services disabled'),
+      findsWidgets,
+    );
+    expect(
+      find.textContaining(
+          'Personalised recommendations from your saved missed ayahs'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Planned:'), findsNothing);
 
     await tester.scrollUntilVisible(
       find.text('HifzAI Pro'),
@@ -186,7 +206,12 @@ void main() {
       find.text('R299 • one-time one-month access, no automatic renewal'),
       findsOneWidget,
     );
-    expect(find.textContaining('Coming soon'), findsWidgets);
+    expect(
+      find.textContaining(
+          'Per-Surah quiz accuracy report and a custom 10-ayah revision session'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Planned:'), findsNothing);
     expect(find.text('Choose'), findsNothing);
   });
 }

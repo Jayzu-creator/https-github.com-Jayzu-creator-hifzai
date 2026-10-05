@@ -1,6 +1,6 @@
 # HifzAI Privacy Policy
 
-**Effective date:** 26 September 2026
+**Effective date:** 5 October 2026
 
 HifzAI is a Quran reading and memorisation companion. Some features require an
 account. Payment and AI recitation features are controlled by server configuration
@@ -11,8 +11,11 @@ and may not be available in every release.
 If you create an account, Supabase processes your email address, authentication
 credentials, and account identifiers so HifzAI can sign you in. HifzAI's server
 stores payment checkout references, plan access dates, and recitation-check usage
-against your account. Yoco processes payment information directly during checkout;
-HifzAI does not receive or store your full card details.
+against your account. Your quiz result for each ayah (remembered or needs revision)
+is saved to your account to show progress and, for eligible plans, generate
+personalised revision recommendations and reports. Yoco processes payment
+information directly during checkout; HifzAI does not receive or store your full
+card details.
 
 ## Microphone and recitation transcription
 

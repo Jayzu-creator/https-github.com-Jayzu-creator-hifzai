@@ -16,6 +16,11 @@ import 'package:flutter/services.dart';
 const supabaseUrl = String.fromEnvironment('SUPABASE_URL');
 const supabaseAnonKey = String.fromEnvironment('SUPABASE_ANON_KEY');
 const paidCheckoutEnabled = bool.fromEnvironment('ENABLE_PAID_CHECKOUT');
+var activeSupabaseUrl = supabaseUrl;
+var activeSupabaseAnonKey = supabaseAnonKey;
+
+bool get supabaseConfigured =>
+    activeSupabaseUrl.isNotEmpty && activeSupabaseAnonKey.isNotEmpty;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -25,10 +30,7 @@ Future<void> main() async {
     runApp(QuranDataErrorApp(error: error));
     return;
   }
-  if (supabaseUrl.isNotEmpty && supabaseAnonKey.isNotEmpty) {
-    await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
-  }
-  runApp(const HifzAIApp());
+  runApp(const HifzAIBootstrap());
 }
 
 class QuranDataErrorApp extends StatelessWidget {
@@ -50,6 +52,90 @@ class QuranDataErrorApp extends StatelessWidget {
           ),
         ),
       );
+}
+
+class SupabaseConfigurationErrorApp extends StatelessWidget {
+  final Object error;
+
+  const SupabaseConfigurationErrorApp({super.key, required this.error});
+
+  @override
+  Widget build(BuildContext context) => MaterialApp(
+        home: Scaffold(
+          body: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Text(
+                'Sign-in configuration could not be loaded. Check your internet connection or ask the app administrator for help.\n\n$error',
+                textAlign: TextAlign.center,
+              ),
+            ),
+          ),
+        ),
+      );
+}
+
+class HifzAIBootstrap extends StatefulWidget {
+      const HifzAIBootstrap({super.key});
+
+      @override
+      State<HifzAIBootstrap> createState() => _HifzAIBootstrapState();
+}
+
+class _HifzAIBootstrapState extends State<HifzAIBootstrap> {
+      Object? configurationError;
+      bool initialized = false;
+
+      @override
+      void initState() {
+        super.initState();
+        _initialize();
+      }
+
+      Future<void> _initialize() async {
+        try {
+          if (activeSupabaseUrl.isEmpty != activeSupabaseAnonKey.isEmpty) {
+            throw const FormatException(
+                'Set both SUPABASE_URL and SUPABASE_ANON_KEY, or set neither.');
+          }
+          if (!supabaseConfigured) {
+            final publicConfig = await PaymentService.getPublicSupabaseConfig();
+            activeSupabaseUrl = publicConfig['supabaseUrl']!;
+            activeSupabaseAnonKey = publicConfig['supabaseAnonKey']!;
+          }
+          await Supabase.initialize(
+            url: activeSupabaseUrl,
+            anonKey: activeSupabaseAnonKey,
+          );
+          if (mounted) setState(() => initialized = true);
+        } catch (error) {
+          if (mounted) setState(() => configurationError = error);
+        }
+      }
+
+      @override
+      Widget build(BuildContext context) {
+        final error = configurationError;
+        if (error != null) {
+          return SupabaseConfigurationErrorApp(error: error);
+        }
+        if (initialized) return const HifzAIApp();
+        return const MaterialApp(
+          home: Scaffold(
+            backgroundColor: C.emeraldDark,
+            body: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  CircularProgressIndicator(color: C.gold),
+                  SizedBox(height: 16),
+                  Text('Connecting securely to HifzAI…'),
+                ],
+              ),
+            ),
+          ),
+        );
+      }
 }
 
 class C {
@@ -132,6 +218,100 @@ class QuranQuizQuestion {
   });
 }
 
+class QuranProgressInsights {
+  final int rememberedCount;
+  final int needsRevisionCount;
+  final List<QuranAyah> needsRevision;
+  final List<QuranSurahProgress> weakestSurahs;
+
+  const QuranProgressInsights({
+    required this.rememberedCount,
+    required this.needsRevisionCount,
+    required this.needsRevision,
+    required this.weakestSurahs,
+  });
+
+  int get reviewedCount => rememberedCount + needsRevisionCount;
+
+  int get accuracyPercent =>
+      reviewedCount == 0 ? 0 : rememberedCount * 100 ~/ reviewedCount;
+
+  static QuranProgressInsights fromRows(List<Map<String, dynamic>> rows) {
+    final needsRevision = <QuranAyah>[];
+    final countsBySurah = <int, _SurahProgressCounts>{};
+    var rememberedCount = 0;
+    var needsRevisionCount = 0;
+
+    for (final row in rows) {
+      final surahId = row['surah_id'] as int;
+      final ayahNumber = row['ayah_number'] as int;
+      if (row['status'] == 'remembered') {
+        rememberedCount++;
+        countsBySurah
+            .putIfAbsent(surahId, _SurahProgressCounts.new)
+            .remembered++;
+      } else if (row['status'] == 'needs_revision') {
+        needsRevisionCount++;
+        countsBySurah.putIfAbsent(surahId, _SurahProgressCounts.new).missed++;
+        final ayahs = QuranService.ayahsForSurah(surahId);
+        if (ayahNumber < 1 || ayahNumber > ayahs.length) continue;
+        final globalIndex = QuranService.allAyahs.indexWhere(
+          (item) => item.surahId == surahId && item.number == ayahNumber,
+        );
+        if (globalIndex <= 0) continue;
+        needsRevision.add(ayahs[ayahNumber - 1]);
+      }
+    }
+
+    needsRevision.sort((a, b) {
+      final surahOrder = a.surahId.compareTo(b.surahId);
+      return surahOrder != 0 ? surahOrder : a.number.compareTo(b.number);
+    });
+    final weakestSurahs = countsBySurah.entries
+        .map((entry) => QuranSurahProgress(
+              surahId: entry.key,
+              reviewedCount: entry.value.remembered + entry.value.missed,
+              rememberedCount: entry.value.remembered,
+              missedCount: entry.value.missed,
+            ))
+        .toList()
+      ..sort((a, b) {
+        final accuracyOrder = a.accuracyPercent.compareTo(b.accuracyPercent);
+        if (accuracyOrder != 0) return accuracyOrder;
+        final missedOrder = b.missedCount.compareTo(a.missedCount);
+        return missedOrder != 0 ? missedOrder : a.surahId.compareTo(b.surahId);
+      });
+
+    return QuranProgressInsights(
+      rememberedCount: rememberedCount,
+      needsRevisionCount: needsRevisionCount,
+      needsRevision: List.unmodifiable(needsRevision),
+      weakestSurahs: List.unmodifiable(weakestSurahs),
+    );
+  }
+}
+
+class QuranSurahProgress {
+  final int surahId;
+  final int reviewedCount;
+  final int rememberedCount;
+  final int missedCount;
+
+  const QuranSurahProgress({
+    required this.surahId,
+    required this.reviewedCount,
+    required this.rememberedCount,
+    required this.missedCount,
+  });
+
+  int get accuracyPercent => rememberedCount * 100 ~/ reviewedCount;
+}
+
+class _SurahProgressCounts {
+  int remembered = 0;
+  int missed = 0;
+}
+
 class QuranService {
   static Map<int, List<QuranAyah>> _ayahsBySurah = const {};
   static List<QuranAyah> _allAyahs = const [];
@@ -181,6 +361,12 @@ class QuranService {
   }
 
   static List<QuranAyah> get allAyahs => _allAyahs;
+
+  static List<QuranAyah> ayahsForSurah(int id) {
+    final ayahs = _ayahsBySurah[id];
+    if (ayahs == null) throw ArgumentError.value(id, 'id', 'Unknown Surah');
+    return ayahs;
+  }
 
   static bool isCorrectAnswer(QuranQuizQuestion question, int choiceIndex) {
     if (choiceIndex < 0 || choiceIndex >= question.choices.length) {
@@ -250,6 +436,45 @@ class QuranService {
       choices: List.unmodifiable(choices),
     );
   }
+
+  static QuranQuizQuestion createQuestionForAnswer(
+    QuranAyah answer, {
+    Random? random,
+  }) {
+    final generator = random ?? Random();
+    final answerIndex = _allAyahs.indexWhere(
+      (ayah) => ayah.surahId == answer.surahId && ayah.number == answer.number,
+    );
+    if (answerIndex <= 0) {
+      throw ArgumentError.value(
+          answer, 'answer', 'This ayah cannot be used as a next-ayah answer.');
+    }
+    final prompt = _allAyahs[answerIndex - 1];
+    final distractorsByText = <String, QuranAyah>{};
+    for (final ayah in _allAyahs) {
+      final isPrompt =
+          ayah.surahId == prompt.surahId && ayah.number == prompt.number;
+      final isAnswer =
+          ayah.surahId == answer.surahId && ayah.number == answer.number;
+      if (!isPrompt &&
+          !isAnswer &&
+          ayah.text != prompt.text &&
+          ayah.text != answer.text) {
+        distractorsByText.putIfAbsent(ayah.text, () => ayah);
+      }
+    }
+    final distractors = distractorsByText.values.toList()..shuffle(generator);
+    final choices = <QuranAyah>[answer, ...distractors.take(3)]
+      ..shuffle(generator);
+    if (choices.length != 4) {
+      throw StateError('Could not create four unique Quran answer choices.');
+    }
+    return QuranQuizQuestion(
+      prompt: prompt,
+      answer: answer,
+      choices: List.unmodifiable(choices),
+    );
+  }
 }
 
 Uint8List pcm16ToWav(
@@ -298,6 +523,31 @@ class PaymentService {
 
   static String? get accessToken =>
       Supabase.instance.client.auth.currentSession?.accessToken;
+
+  static Future<Map<String, String>> getPublicSupabaseConfig() async {
+    final response = await http
+        .get(Uri.parse('$apiBaseUrl/public-config'))
+        .timeout(const Duration(seconds: 45));
+    if (response.statusCode != 200) {
+      throw Exception(
+        'Public sign-in configuration returned HTTP ${response.statusCode}.',
+      );
+    }
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    final url = data['supabaseUrl'];
+    final anonKey = data['supabaseAnonKey'];
+    final parsedUrl = url is String ? Uri.tryParse(url) : null;
+    if (parsedUrl == null ||
+        parsedUrl.scheme != 'https' ||
+        parsedUrl.host.isEmpty ||
+        anonKey is! String ||
+        anonKey.isEmpty) {
+      throw const FormatException(
+        'The server returned an invalid public sign-in configuration.',
+      );
+    }
+    return {'supabaseUrl': parsedUrl.toString(), 'supabaseAnonKey': anonKey};
+  }
 
   static Future<PaymentCheckout> createCheckout(String plan) async {
     final token = accessToken;
@@ -384,12 +634,16 @@ class PaymentService {
   }
 
   static Future<bool> isRecitationAvailable() async {
+    final features = await getFeatureFlags();
+    return features['recitationEnabled'] == true;
+  }
+
+  static Future<Map<String, dynamic>> getFeatureFlags() async {
     final response = await http.get(Uri.parse('$apiBaseUrl/features'));
     if (response.statusCode != 200) {
       throw Exception('Feature status returned HTTP ${response.statusCode}.');
     }
-    final data = jsonDecode(response.body) as Map<String, dynamic>;
-    return data['recitationEnabled'] == true;
+    return jsonDecode(response.body) as Map<String, dynamic>;
   }
 
   static Future<void> saveAyahProgress({
@@ -416,13 +670,22 @@ class PaymentService {
     final client = Supabase.instance.client;
     final userId = client.auth.currentUser?.id;
     if (userId == null) throw Exception('Sign in again to load your progress.');
-    final rows = await client
-        .from('ayah_progress')
-        .select('surah_id, ayah_number, status, updated_at')
-        .eq('user_id', userId)
-        .order('updated_at', ascending: false)
-        .limit(50);
-    return List<Map<String, dynamic>>.from(rows);
+    const pageSize = 1000;
+    final allRows = <Map<String, dynamic>>[];
+    for (var offset = 0; offset < 6236; offset += pageSize) {
+      final page = await client
+          .from('ayah_progress')
+          .select('surah_id, ayah_number, status, updated_at')
+          .eq('user_id', userId)
+          .order('updated_at', ascending: false)
+          .order('surah_id')
+          .order('ayah_number')
+          .range(offset, min(offset + pageSize, 6236) - 1);
+      final rows = List<Map<String, dynamic>>.from(page);
+      allRows.addAll(rows);
+      if (rows.length < pageSize) break;
+    }
+    return allRows;
   }
 
   static Future<Map<String, dynamic>> checkRecitation({
@@ -514,7 +777,7 @@ class AuthGate extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (supabaseUrl.isEmpty || supabaseAnonKey.isEmpty) {
+    if (!supabaseConfigured) {
       return const SetupRequiredScreen();
     }
     final client = Supabase.instance.client;
@@ -2131,14 +2394,19 @@ class _RecitationCheckScreenState extends State<RecitationCheckScreen> {
 }
 
 class MemorisationTestScreen extends StatefulWidget {
-  const MemorisationTestScreen({super.key});
+  final List<QuranAyah> revisionTargets;
+
+  const MemorisationTestScreen({
+    super.key,
+    this.revisionTargets = const [],
+  });
 
   @override
   State<MemorisationTestScreen> createState() => _MemorisationTestScreenState();
 }
 
 class _MemorisationTestScreenState extends State<MemorisationTestScreen> {
-  static const questionCount = 10;
+  static const defaultQuestionCount = 10;
 
   int selectedSurahId = 0;
   QuranQuizQuestion? question;
@@ -2148,9 +2416,17 @@ class _MemorisationTestScreenState extends State<MemorisationTestScreen> {
   bool answered = false;
   bool complete = false;
 
+  int get questionCount => widget.revisionTargets.isEmpty
+      ? defaultQuestionCount
+      : min(defaultQuestionCount, widget.revisionTargets.length);
+
+  QuranQuizQuestion _questionAt(int index) => widget.revisionTargets.isEmpty
+      ? _newQuestion()
+      : QuranService.createQuestionForAnswer(widget.revisionTargets[index]);
+
   void startTest() {
     setState(() {
-      question = _newQuestion();
+      question = _questionAt(0);
       questionNumber = 1;
       selectedChoice = null;
       correct = 0;
@@ -2171,7 +2447,7 @@ class _MemorisationTestScreenState extends State<MemorisationTestScreen> {
       answered = true;
       if (isCorrect) correct++;
     });
-    if (supabaseUrl.isNotEmpty && supabaseAnonKey.isNotEmpty) {
+    if (supabaseConfigured) {
       PaymentService.saveAyahProgress(
         surahId: current.answer.surahId,
         ayahNumber: current.answer.number,
@@ -2192,7 +2468,7 @@ class _MemorisationTestScreenState extends State<MemorisationTestScreen> {
       return;
     }
     setState(() {
-      question = _newQuestion();
+      question = _questionAt(questionNumber);
       questionNumber++;
       selectedChoice = null;
       answered = false;
@@ -2204,7 +2480,9 @@ class _MemorisationTestScreenState extends State<MemorisationTestScreen> {
     final current = question;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Quran Memory Quiz'),
+        title: Text(widget.revisionTargets.isEmpty
+            ? 'Quran Memory Quiz'
+            : 'Focused Revision'),
         backgroundColor: C.emeraldDark,
         foregroundColor: C.cream,
       ),
@@ -2214,7 +2492,9 @@ class _MemorisationTestScreenState extends State<MemorisationTestScreen> {
           Text('What comes next?', style: serif(28, w: FontWeight.bold)),
           const SizedBox(height: 8),
           Text(
-            'Read the ayah, recall what follows, and choose the next ayah from four options. Questions use the complete bundled Quran.',
+            widget.revisionTargets.isEmpty
+                ? 'Read the ayah, recall what follows, and choose the next ayah from four options. Questions use the complete bundled Quran.'
+                : 'Review ayahs marked for revision in your saved quiz history.',
             style: TextStyle(color: C.cream.withOpacity(0.75)),
           ),
           const SizedBox(height: 20),
@@ -2231,7 +2511,7 @@ class _MemorisationTestScreenState extends State<MemorisationTestScreen> {
                 ),
               ),
             ],
-            onChanged: question != null
+            onChanged: question != null || widget.revisionTargets.isNotEmpty
                 ? null
                 : (surahId) {
                     if (surahId != null) {
@@ -2242,7 +2522,9 @@ class _MemorisationTestScreenState extends State<MemorisationTestScreen> {
           const SizedBox(height: 14),
           if (current == null)
             GoldButton(
-              label: 'Start 10-question quiz',
+              label: widget.revisionTargets.isEmpty
+                  ? 'Start 10-question quiz'
+                  : 'Start focused revision',
               icon: Icons.play_arrow_rounded,
               onPressed: startTest,
             )
@@ -2523,12 +2805,32 @@ class ProgressScreen extends StatefulWidget {
 class _ProgressScreenState extends State<ProgressScreen> {
   Future<Map<String, dynamic>>? entitlementFuture;
   Future<List<Map<String, dynamic>>>? progressFuture;
+  bool checkoutStatusLoaded = false;
+  bool serverCheckoutEnabled = false;
+  bool recitationServiceEnabled = false;
+  String? checkoutStatusError;
   bool startingCheckout = false;
 
   @override
   void initState() {
     super.initState();
-    if (supabaseUrl.isNotEmpty && supabaseAnonKey.isNotEmpty) {
+    if (supabaseConfigured) {
+      PaymentService.getFeatureFlags().then((features) {
+        if (!mounted) return;
+        setState(() {
+          checkoutStatusLoaded = true;
+          serverCheckoutEnabled = features['paidCheckoutEnabled'] == true;
+          recitationServiceEnabled = features['recitationEnabled'] == true;
+        });
+      }).catchError((Object error) {
+        if (!mounted) return;
+        setState(() {
+          checkoutStatusLoaded = true;
+          checkoutStatusError = error.toString();
+        });
+      });
+    }
+    if (supabaseConfigured) {
       entitlementFuture = PaymentService.getEntitlement();
       progressFuture = PaymentService.getAyahProgress();
     }
@@ -2562,12 +2864,32 @@ class _ProgressScreenState extends State<ProgressScreen> {
             const SizedBox(height: 8),
             Text(
               AppLanguage.t(
-                'Core Quran reading is free. Paid checkout is disabled while the service is being tested. One-time access periods will not renew automatically.',
-                'قراءة القرآن الأساسية مجانية. الدفع معطل أثناء اختبار الخدمة. فترات الوصول المدفوعة لا تتجدد تلقائياً.',
+                checkoutAvailable
+                    ? 'Paid checkout is enabled. Purchases are one-time and do not renew automatically.'
+                    : 'Paid study features are implemented, but purchases stay unavailable until the payment service is enabled and verified.',
+                checkoutAvailable
+                    ? 'الدفع للخطط المدفوعة مفعّل. المشتريات لمرة واحدة ولا تتجدد تلقائياً.'
+                    : 'ميزات الدراسة المدفوعة مفعّلة برمجياً، لكن الشراء غير متاح حتى تفعيل خدمة الدفع والتحقق منها.',
               ),
               textAlign: TextAlign.center,
               style: TextStyle(color: C.cream.withOpacity(0.7)),
             ),
+            if (checkoutStatusError != null) ...[
+              const SizedBox(height: 6),
+              Text(
+                'Checkout availability could not be verified: $checkoutStatusError',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: C.goldLight),
+              ),
+            ],
+            if (checkoutStatusLoaded && !recitationServiceEnabled) ...[
+              const SizedBox(height: 6),
+              const Text(
+                'The live server has not enabled AI transcript checks yet.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: C.goldLight),
+              ),
+            ],
             const SizedBox(height: 14),
             _planCard(
               title: AppLanguage.t('HifzAI Free', 'HifzAI مجاني'),
@@ -2592,8 +2914,14 @@ class _ProgressScreenState extends State<ProgressScreen> {
                 AppLanguage.t(
                     'Saved self-guided ayah recall and revision status',
                     'حفظ نتيجة استرجاع الآية ذاتياً وحالة المراجعة'),
-                AppLanguage.t('Recitation service is not currently enabled',
-                    'خدمة التلاوة غير مفعّلة حالياً'),
+                AppLanguage.t(
+                  recitationServiceEnabled
+                      ? 'Estimated transcript checks are available on this server'
+                      : 'AI recitation checks are currently disabled on the server',
+                  recitationServiceEnabled
+                      ? 'فحوص التفريغ التقديرية متاحة على هذا الخادم'
+                      : 'فحوص التلاوة بالذكاء الاصطناعي معطّلة حالياً على الخادم',
+                ),
               ],
             ),
             const SizedBox(height: 12),
@@ -2604,37 +2932,24 @@ class _ProgressScreenState extends State<ProgressScreen> {
                 'one-time one-month access • R1,499 one-time for 12 months',
                 'دفع لمرة واحدة لشهر • 1,499 راند لمرة واحدة لمدة 12 شهراً',
               ),
-              status: AppLanguage.t(
-                paidCheckoutEnabled
-                    ? 'Available • one-time access, no auto-renewal'
-                    : 'Coming soon',
-                paidCheckoutEnabled
-                    ? 'متاح • وصول بدفع لمرة واحدة دون تجديد تلقائي'
-                    : 'قريباً',
-              ),
+              status: paidPlanStatus,
               badge: AppLanguage.t('Recommended', 'موصى به'),
               features: [
                 AppLanguage.t(
-                    'Up to 50 estimated transcript comparisons per UTC month',
-                    'مخطط: حتى 50 فحص تلاوة بالذكاء الاصطناعي شهرياً'),
+                    'Up to 50 estimated transcript comparisons per UTC month when the service is enabled',
+                    'حتى 50 مقارنة تقديرية للتفريغ شهرياً بالتوقيت العالمي عند تفعيل الخدمة'),
                 AppLanguage.t(
-                    'Word-level transcript comparison is approximate, not advanced Tajweed grading',
-                    'مقارنة الكلمات تقديرية وليست تقييماً متقدماً للتجويد'),
+                    'Personalised recommendations from your saved missed ayahs',
+                    'توصيات مخصصة من الآيات التي أخطأت فيها والمحفوظه في سجلّك'),
                 AppLanguage.t(
-                    'Planned: madd timing, ghunnah, qalqalah, ikhfa, and idgham feedback',
-                    'مخطط: ملاحظات للمد والغنة والقلقلة والإخفاء والإدغام'),
+                    'Focused revision quiz built from your saved ayah results',
+                    'اختبار مراجعة مخصص مبني على نتائج آياتك المحفوظة'),
                 AppLanguage.t(
-                    'Planned: makharij feedback where technically supported',
-                    'مخطط: ملاحظات للمخارج حيثما أمكن تقنياً'),
-                AppLanguage.t(
-                    'Planned: Hifz tracking, revision sessions, and practice recommendations',
-                    'مخطط: تتبع الحفظ وجلسات المراجعة وتوصيات التدريب'),
-                AppLanguage.t(
-                    'Planned: progress history, core AI tutor, and no ads',
-                    'مخطط: سجل التقدم والمعلّم الذكي الأساسي وبدون إعلانات'),
+                    'Approximate Arabic transcript comparison, not Tajweed grading',
+                    'مقارنة تقريبية للتفريغ العربي وليست تقييماً للتجويد'),
               ],
               highlighted: true,
-              choices: paidCheckoutEnabled
+              choices: checkoutAvailable
                   ? const [
                       MapEntry('R199 • one month', 'plus_monthly'),
                       MapEntry('R1,499 • 12 months', 'plus_yearly'),
@@ -2650,34 +2965,23 @@ class _ProgressScreenState extends State<ProgressScreen> {
               period: AppLanguage.t(
                   'one-time one-month access, no automatic renewal',
                   'دفع لمرة واحدة لشهر دون تجديد تلقائي'),
-              status: AppLanguage.t(
-                paidCheckoutEnabled
-                    ? 'Available • one-time access, no auto-renewal'
-                    : 'Coming soon',
-                paidCheckoutEnabled
-                    ? 'متاح • وصول بدفع لمرة واحدة دون تجديد تلقائي'
-                    : 'قريباً',
-              ),
+              status: paidPlanStatus,
               features: [
                 AppLanguage.t(
-                    'Planned: up to 150 AI recitation checks per month',
-                    'مخطط: حتى 150 فحص تلاوة بالذكاء الاصطناعي شهرياً'),
-                AppLanguage.t('Planned: everything proposed for Plus',
-                    'مخطط: جميع ميزات بلس المقترحة'),
+                    'Up to 150 estimated transcript comparisons per UTC month when the service is enabled',
+                    'حتى 150 مقارنة تقديرية للتفريغ شهرياً بالتوقيت العالمي عند تفعيل الخدمة'),
                 AppLanguage.t(
-                    'Planned: more detailed pronunciation analysis and longer practice sessions',
-                    'مخطط: تحليل أدق للنطق وجلسات تدريب أطول'),
+                    'Everything included in Plus', 'كل ما تتضمنه خطة بلس'),
+                AppLanguage.t('Performance report from your saved quiz results',
+                    'تقرير أداء من نتائج اختباراتك المحفوظة'),
                 AppLanguage.t(
-                    'Planned: advanced memorisation analytics and custom revision plans',
-                    'مخطط: تحليلات متقدمة للحفظ وخطط مراجعة مخصصة'),
+                    'Per-Surah quiz accuracy report and a custom 10-ayah revision session',
+                    'تقرير دقة الاختبارات لكل سورة وجلسة مراجعة مخصصة لعشر آيات'),
                 AppLanguage.t(
-                    'Planned: difficult-ayah tracking and weak-area identification',
-                    'مخطط: تتبع الآيات الصعبة وتحديد مواطن الضعف'),
-                AppLanguage.t(
-                    'Planned: detailed performance reports, priority new features, and no ads',
-                    'مخطط: تقارير أداء مفصلة وأولوية الميزات الجديدة وبدون إعلانات'),
+                    'Limits and paid access are verified and enforced by the server',
+                    'يتحقق الخادم من حدود الاستخدام والوصول المدفوع ويفرضها'),
               ],
-              choices: paidCheckoutEnabled
+              choices: checkoutAvailable
                   ? const [MapEntry('R299 • one month', 'pro_monthly')]
                   : const [],
               onChoose: _startCheckout,
@@ -2696,8 +3000,41 @@ class _ProgressScreenState extends State<ProgressScreen> {
         ),
       );
 
+  bool get checkoutAvailable =>
+      paidCheckoutEnabled && checkoutStatusLoaded && serverCheckoutEnabled;
+
+  String get paidPlanStatus {
+    if (checkoutAvailable) {
+      return AppLanguage.t(
+        'Available • one-time access, no auto-renewal',
+        'متاح • وصول بدفع لمرة واحدة دون تجديد تلقائي',
+      );
+    }
+    if (checkoutStatusError != null) {
+      return AppLanguage.t(
+        'Service status could not be verified',
+        'تعذر التحقق من حالة الخدمة',
+      );
+    }
+    if (paidCheckoutEnabled && !checkoutStatusLoaded) {
+      return AppLanguage.t(
+        'Checking service availability…',
+        'جارٍ التحقق من توفر الخدمة…',
+      );
+    }
+    return recitationServiceEnabled
+        ? AppLanguage.t(
+            'Study tools enabled • checkout disabled',
+            'أدوات الدراسة مفعلة • الدفع معطل',
+          )
+        : AppLanguage.t(
+            'Study tools ready • live services disabled',
+            'أدوات الدراسة جاهزة • الخدمات المباشرة غير مفعلة',
+          );
+  }
+
   Future<void> _startCheckout(String plan) async {
-    if (startingCheckout) return;
+    if (startingCheckout || !checkoutAvailable) return;
     setState(() => startingCheckout = true);
     try {
       await PaymentService.launchCheckout(plan);
@@ -2725,6 +3062,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
                 child: CircularProgressIndicator(color: C.gold));
           }
           final rows = snapshot.data ?? const <Map<String, dynamic>>[];
+          final insights = QuranProgressInsights.fromRows(rows);
           if (rows.isEmpty) {
             return Text(
               'Complete a self-guided ayah test to begin saving your progress.',
@@ -2732,48 +3070,186 @@ class _ProgressScreenState extends State<ProgressScreen> {
               style: TextStyle(color: C.cream.withOpacity(0.75)),
             );
           }
-          final remembered =
-              rows.where((row) => row['status'] == 'remembered').length;
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                '$remembered remembered • ${rows.length - remembered} to revise',
-                style: const TextStyle(color: C.goldLight),
-              ),
-              const SizedBox(height: 8),
-              ...rows.map((row) {
-                final surahId = row['surah_id'] as int;
-                final ayahNumber = row['ayah_number'] as int;
-                final surah = D.surahs.where((item) => item.id == surahId);
-                final surahName =
-                    surah.isEmpty ? 'Surah $surahId' : surah.first.name;
-                final needsRevision = row['status'] == 'needs_revision';
-                return ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  leading: Icon(
-                    needsRevision
-                        ? Icons.replay_rounded
-                        : Icons.check_circle_outline_rounded,
-                    color: C.goldLight,
+          return FutureBuilder<Map<String, dynamic>>(
+            future: entitlementFuture,
+            builder: (context, entitlementSnapshot) {
+              final plan = entitlementSnapshot.data?['plan'] as String?;
+              final isPlus = plan == 'plus' || plan == 'pro';
+              final isPro = plan == 'pro';
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${insights.rememberedCount} remembered • '
+                    '${insights.needsRevisionCount} to revise',
+                    style: const TextStyle(color: C.goldLight),
                   ),
-                  title: Text('$surahName • Ayah $ayahNumber'),
-                  subtitle: Text(
-                    needsRevision ? 'Needs revision' : 'Remembered',
-                    style: TextStyle(color: C.cream.withOpacity(0.7)),
+                  if (isPlus) ...[
+                    const SizedBox(height: 16),
+                    _personalisedRevision(insights),
+                  ],
+                  if (isPro) ...[
+                    const SizedBox(height: 16),
+                    _proPerformanceReport(insights),
+                  ],
+                  if (entitlementSnapshot.hasError) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      'Could not verify your plan for personalised features: '
+                      '${entitlementSnapshot.error}',
+                      style: const TextStyle(color: C.goldLight),
+                    ),
+                  ] else if (!isPlus) ...[
+                    const SizedBox(height: 12),
+                    const Text(
+                      'Personalised revision recommendations are included with Plus and Pro.',
+                      style: TextStyle(color: C.cream),
+                    ),
+                  ],
+                  const SizedBox(height: 8),
+                  ...rows.take(50).map((row) {
+                    final surahId = row['surah_id'] as int;
+                    final ayahNumber = row['ayah_number'] as int;
+                    final surah = D.surahs.where((item) => item.id == surahId);
+                    final surahName =
+                        surah.isEmpty ? 'Surah $surahId' : surah.first.name;
+                    final needsRevision = row['status'] == 'needs_revision';
+                    return ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(
+                        needsRevision
+                            ? Icons.replay_rounded
+                            : Icons.check_circle_outline_rounded,
+                        color: C.goldLight,
+                      ),
+                      title: Text('$surahName • Ayah $ayahNumber'),
+                      subtitle: Text(
+                        needsRevision ? 'Needs revision' : 'Remembered',
+                        style: TextStyle(color: C.cream.withOpacity(0.7)),
+                      ),
+                    );
+                  }),
+                  TextButton.icon(
+                    onPressed: () => setState(() =>
+                        progressFuture = PaymentService.getAyahProgress()),
+                    icon: const Icon(Icons.refresh_rounded),
+                    label: const Text('Refresh progress'),
                   ),
-                );
-              }),
-              TextButton.icon(
-                onPressed: () => setState(
-                    () => progressFuture = PaymentService.getAyahProgress()),
-                icon: const Icon(Icons.refresh_rounded),
-                label: const Text('Refresh progress'),
-              ),
-            ],
+                ],
+              );
+            },
           );
         },
       );
+
+  Widget _personalisedRevision(QuranProgressInsights insights) {
+    final focusSurahs = insights.weakestSurahs.take(3).map(
+          (surah) =>
+              '${D.surahs[surah.surahId - 1].name} (${surah.accuracyPercent}%)',
+        );
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: C.emerald.withOpacity(0.55),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: C.gold.withOpacity(0.45)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Your Plus revision recommendations',
+              style:
+                  TextStyle(color: C.goldLight, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 6),
+          if (focusSurahs.isEmpty)
+            Text(
+              'No saved quiz history yet. Your recommendations will appear as you complete quizzes.',
+              style: TextStyle(color: C.cream.withOpacity(0.85)),
+            )
+          else ...[
+            Text(
+              'Focus on ${focusSurahs.join(', ')}. These are based on ayahs you marked for revision.',
+              style: TextStyle(color: C.cream.withOpacity(0.85)),
+            ),
+            if (insights.needsRevision.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              OutlinedButton.icon(
+                onPressed: () => _openRevisionQuiz(
+                    insights.needsRevision.take(5).toList(growable: false)),
+                icon: const Icon(Icons.replay_rounded),
+                label: const Text('Practice 5 recommended ayahs'),
+              ),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _proPerformanceReport(QuranProgressInsights insights) {
+    final weakSurahs = insights.weakestSurahs.take(5);
+    final revisionTargets = insights.needsRevision.take(10).toList(
+          growable: false,
+        );
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: C.emerald.withOpacity(0.55),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: C.gold),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Pro memorisation report',
+              style:
+                  TextStyle(color: C.goldLight, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 6),
+          Text(
+            '${insights.accuracyPercent}% remembered across '
+            '${insights.reviewedCount} tracked ayahs.',
+            style: const TextStyle(color: C.cream),
+          ),
+          if (weakSurahs.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 10),
+              child: Text('No saved quiz results yet.'),
+            )
+          else ...[
+            const SizedBox(height: 8),
+            const Text('Accuracy by Surah',
+                style: TextStyle(color: C.goldLight)),
+            ...weakSurahs.map((surah) => ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  title: Text(D.surahs[surah.surahId - 1].name),
+                  subtitle: Text(
+                    '${surah.missedCount} ayahs marked for revision',
+                  ),
+                  trailing: Text('${surah.accuracyPercent}%'),
+                )),
+            if (revisionTargets.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              GoldButton(
+                label: 'Start custom 10-ayah revision session',
+                icon: Icons.auto_awesome_rounded,
+                onPressed: () => _openRevisionQuiz(revisionTargets),
+              ),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+
+  void _openRevisionQuiz(List<QuranAyah> targets) {
+    if (targets.isEmpty) return;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => MemorisationTestScreen(revisionTargets: targets),
+      ),
+    );
+  }
 
   Widget _accountPlanCard(Future<Map<String, dynamic>> future) =>
       FutureBuilder<Map<String, dynamic>>(

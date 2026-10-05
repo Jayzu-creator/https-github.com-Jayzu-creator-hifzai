@@ -21,6 +21,6 @@ services:
       - key: OPENAI_API_KEY
         sync: false
       - key: RECITATION_ENABLED
-        value: "false"
+        value: "true"
       - key: PAID_PLANS_ENABLED
-        value: "false"
+        value: "true"

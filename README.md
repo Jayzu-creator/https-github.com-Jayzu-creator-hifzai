@@ -10,13 +10,26 @@ HifzAI is a Quran reading and memorisation companion built with Flutter.
 - Email/password accounts with Supabase Auth
 - Consent-based short recitation recording and approximate transcript comparison
 - Server-side plan periods and recitation usage quotas
+- Plus revision recommendations and Pro per-Surah accuracy reports with focused revision quizzes
 
 The memorisation quiz asks learners to choose the next ayah from four choices,
 using the complete Quran text stored in the app. The recitation tool compares an
 Arabic speech transcript with the selected ayah. It is an estimate, not a Tajweed
 assessment or religious ruling. Payment checkout is currently disabled. Yoco
 charges are one-time: paid access lasts one or twelve calendar months and does not
-renew automatically.
+renew automatically. Live checkout has not yet been deployed; the backend
+configuration targets Yoco test mode, not live charges.
+
+Plus and Pro include respectively 50 and 150 estimated transcript comparisons per
+UTC month when the recitation service is enabled. Plus recommendations and Pro
+performance reports are based on the learner's saved quiz outcomes; focused
+revision quizzes target ayahs marked for review. These features do not provide
+Tajweed or pronunciation grading. The live backend currently reports paid checkout
+and recitation as disabled. The deployment configuration now enables Yoco test
+checkout and consent-based test recitation; it must be redeployed before the
+feature flags can take effect. Each submitted recording is sent to OpenAI and may
+incur API charges. Verify the test payment and recording flows before any live
+launch.
 
 ## Support and privacy
 
@@ -50,17 +63,22 @@ Build the web app with the Supabase project URL and public anon key:
 
 ```powershell
 flutter build web --release `
-  --dart-define=SUPABASE_URL=https://your-project.supabase.co `
-  --dart-define=SUPABASE_ANON_KEY=your-public-anon-key `
   --dart-define=PAYMENTS_API_BASE_URL=https://your-server.onrender.com `
   --dart-define=ENABLE_PAID_CHECKOUT=true
 ```
 
+If the two Supabase build values are omitted, the app loads the public project URL
+and anon key from the backend's `/public-config` endpoint. The anon key is
+publishable and is protected by Supabase row-level security; the service-role key
+is never returned by that endpoint.
+
 The backend defines R199 for one month of Plus, R1,499 for twelve months of Plus,
 and R299 for one month of Pro. `ENABLE_PAID_CHECKOUT=true` only adds the client-side
 purchase buttons; checkout still requires `PAID_PLANS_ENABLED=true` on Render.
-Keep both `PAID_PLANS_ENABLED` and `RECITATION_ENABLED` disabled until the schema,
-test checkout flow, provider settings, and full release have been verified. A
+The Render blueprint enables checkout only for the user-confirmed Yoco test-key
+setup and enables consent-based recitation testing. Keep live Yoco credentials
+disabled and do not switch to production until the schema, test checkout, OpenAI
+transcription, provider settings, and complete release have been verified. A
 success redirect alone is never proof of payment.
 
 ## Quran text and attribution

@@ -82,6 +82,16 @@ function serviceConfigured() {
   return Boolean(supabaseUrl && supabaseAnonKey && supabaseServiceRoleKey);
 }
 
+function checkoutConfigured() {
+  return Boolean(
+    paidPlansEnabled &&
+    yocoSecretKey &&
+    appBaseUrl &&
+    allowedOrigin &&
+    serviceConfigured(),
+  );
+}
+
 async function requireUser(req) {
   const authorization = req.headers.authorization || '';
   const match = authorization.match(/^Bearer ([\w.-]+)$/);
@@ -281,10 +291,20 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true });
     }
 
+    if (req.method === 'GET' && url.pathname === '/public-config') {
+      if (!supabaseUrl || !supabaseAnonKey) {
+        return json(res, 503, { error: 'Public sign-in configuration is not set.' });
+      }
+      return json(res, 200, {
+        supabaseUrl,
+        supabaseAnonKey,
+      });
+    }
+
     if (req.method === 'GET' && url.pathname === '/features') {
       return json(res, 200, {
         recitationEnabled: Boolean(recitationEnabled && openAiApiKey && serviceConfigured()),
-        paidCheckoutEnabled: paidPlansEnabled,
+        paidCheckoutEnabled: checkoutConfigured(),
       });
     }
 
