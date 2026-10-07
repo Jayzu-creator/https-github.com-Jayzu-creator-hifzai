@@ -59,13 +59,20 @@ and status verification, and optional recitation transcription. Run the SQL sche
 in `supabase/schema.sql` in the Supabase SQL Editor, then configure Render as detailed
 in [`server/README.md`](server/README.md) and [`render.yaml`](render.yaml).
 
-Build the web app with the Supabase project URL and public anon key:
+For local web builds, the app can load the public Supabase configuration from the
+backend. Optional `SUPABASE_URL` and `SUPABASE_ANON_KEY` defines can be supplied
+when building instead:
 
 ```powershell
 flutter build web --release `
+  --base-href=/https-github.com-Jayzu-creator-hifzai/ `
   --dart-define=PAYMENTS_API_BASE_URL=https://your-server.onrender.com `
   --dart-define=ENABLE_PAID_CHECKOUT=true
 ```
+
+GitHub Pages is deployed by [`.github/workflows/deploy-pages.yml`](.github/workflows/deploy-pages.yml)
+from `main`. In repository **Settings → Pages**, set the build and deployment
+source to **GitHub Actions**.
 
 If the two Supabase build values are omitted, the app loads the public project URL
 and anon key from the backend's `/public-config` endpoint. The anon key is
