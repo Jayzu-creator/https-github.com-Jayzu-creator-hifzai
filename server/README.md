@@ -8,16 +8,25 @@ server; never put them in Flutter, the browser, or source control.
 
 1. Create a Supabase project and enable email/password authentication.
 2. In the SQL Editor, run [`../supabase/schema.sql`](../supabase/schema.sql).
-3. Configure the site's allowed redirect URL in Supabase Auth for account confirmation.
+   For an existing project, rerun the updated schema before deploying these
+   monthly allowances and add-on packs.
+3. In **Authentication → URL Configuration**, set the Site URL to the deployed
+   app URL and add that URL to Redirect URLs. The sign-in screen can resend a
+   pending signup confirmation: enter the account email and select **Resend
+   confirmation email**.
 4. The unauthenticated `/public-config` endpoint returns only the Supabase project
    URL and public anon key so the web app can initialize sign-in. Never return or
    bundle the service-role key; it must only be stored in Render.
 
 The schema stores payment checkouts, paid access periods, per-period recitation
-usage, and a user-owned progress table. The backend grants access only after it
+usage, 24-hour add-on packs, and a user-owned progress table. The backend grants access only after it
 fetches a completed Yoco checkout and checks its amount and currency. Granting is
-idempotent. Yoco purchases are one-time charges: monthly access lasts one calendar
-month and yearly access lasts twelve calendar months; neither renews automatically.
+idempotent. All Yoco purchases are one-time charges. Monthly access lasts one month
+from its access-period start and must be renewed manually; it does not auto-renew.
+The 50- and 100-check add-on packs are available after the monthly allowance is
+used and expire 24 hours after verified payment.
+Customers may hold multiple active packs; remaining checks are combined and packs
+are consumed in earliest-expiry order.
 
 ## Render configuration
 
@@ -41,16 +50,11 @@ Audio is kept in memory by this server and not written to disk or a database. A
 consented WAV is forwarded to OpenAI for transcription. The feature compares the
 transcript with the selected ayah as a rough word-similarity estimate. It does not
 grade Tajweed, confirm correct pronunciation, or replace a qualified Quran teacher.
-Free accounts are limited to three completed checks per UTC day; Plus and Pro
-entitlements allow 50 and 150 checks per UTC month respectively. The Flutter app
-builds Plus revision recommendations and Pro per-Surah accuracy reports from the account's
-saved self-graded quiz results; Pro revision sessions quiz ayahs marked for review.
-These study tools do not make claims about Tajweed or pronunciation accuracy.
-
-The currently deployed `/features` endpoint reports both flags as `false`; pushing
-and syncing the updated Render blueprint is required before test checkout and
-transcription can start. Verify the test payment and consented recording flows
-before switching to live payment credentials.
+Free accounts receive five checks total. Paid monthly plans include 400, 700, or
+1,000 checks for each paid month; unused monthly checks do not roll over. All paid
+plans include revision recommendations, per-Surah accuracy reports, and focused
+revision sessions based on saved self-graded quiz results. These study tools do not
+make claims about Tajweed or pronunciation accuracy.
 
 ## Local setup
 
@@ -63,9 +67,11 @@ Set the environment values locally, then run `npm start`. Do not commit `.env`.
 
 The server's fixed one-time checkout prices are:
 
-- `plus_monthly`: R199 for one calendar month
-- `plus_yearly`: R1,499 for twelve calendar months
-- `pro_monthly`: R299 for one calendar month
+- `monthly_400`: R199,00 for one month and 400 recitation checks
+- `monthly_700`: R299,00 for one month and 700 recitation checks
+- `monthly_1000`: R399,00 for one month and 1,000 recitation checks
+- `daily_50`: R39,99 for 50 additional checks, valid 24 hours after payment
+- `daily_100`: R89,99 for 100 additional checks, valid 24 hours after payment
 
 `PAID_PLANS_ENABLED` defaults to disabled. Test Yoco transactions may not appear in
 the merchant sales dashboard; verify their status via the authenticated

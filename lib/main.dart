@@ -870,6 +870,43 @@ class _SignInScreenState extends State<SignInScreen> {
     }
   }
 
+  Future<void> resendConfirmation() async {
+    final email = emailController.text.trim();
+    if (email.isEmpty) {
+      setState(() => message = AppLanguage.t(
+            'Enter your email address first.',
+            'أدخل عنوان بريدك الإلكتروني أولاً.',
+          ));
+      return;
+    }
+
+    setState(() {
+      loading = true;
+      message = null;
+    });
+    try {
+      await Supabase.instance.client.auth.resend(
+        type: OtpType.signup,
+        email: email,
+        emailRedirectTo: Uri.base.origin + Uri.base.path,
+      );
+      if (mounted) {
+        setState(() => message = AppLanguage.t(
+              'Confirmation email sent. Check your inbox and spam folder.',
+              'تم إرسال رسالة التأكيد. تحقق من صندوق الوارد والبريد العشوائي.',
+            ));
+      }
+    } on AuthException catch (error) {
+      if (mounted) setState(() => message = error.message);
+    } catch (error) {
+      if (mounted) {
+        setState(() => message = 'Could not resend confirmation email: $error');
+      }
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
   @override
   void dispose() {
     emailController.dispose();
@@ -940,6 +977,15 @@ class _SignInScreenState extends State<SignInScreen> {
                     icon: createAccount ? Icons.person_add_alt_1 : Icons.login,
                     onPressed: loading ? () {} : submit,
                   ),
+                  if (!createAccount)
+                    TextButton.icon(
+                      onPressed: loading ? null : resendConfirmation,
+                      icon: const Icon(Icons.mark_email_unread_outlined),
+                      label: Text(AppLanguage.t(
+                        'Resend confirmation email',
+                        'إعادة إرسال رسالة التأكيد',
+                      )),
+                    ),
                   TextButton(
                     onPressed: loading
                         ? null
@@ -1049,6 +1095,10 @@ class _PaymentReturnScreenState extends State<PaymentReturnScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final isDailyPack =
+        paymentStatus?.entitlement?.containsKey('checks_remaining') ?? false;
+    final dailyPackChecks =
+        paymentStatus?.entitlement?['checks_remaining'] as int?;
     final success = paymentStatus?.confirms(
           paymentStatus?.amount ?? -1,
         ) ??
@@ -1077,10 +1127,14 @@ class _PaymentReturnScreenState extends State<PaymentReturnScreen> {
                 ? AppLanguage.t(
                     paymentStatus?.entitlement == null
                         ? 'Yoco confirmed the payment. Access is still being saved; check your plan status shortly.'
-                        : 'Yoco confirmed your payment and your access period was saved to your account.',
+                        : isDailyPack
+                            ? 'Yoco confirmed your payment. Your $dailyPackChecks extra checks are ready for 24 hours.'
+                            : 'Yoco confirmed your payment and your access period was saved to your account.',
                     paymentStatus?.entitlement == null
                         ? 'أكدت Yoco الدفع. ما زال حفظ الوصول جارياً؛ تحقق من حالة خطتك بعد قليل.'
-                        : 'أكدت Yoco الدفع وتم حفظ فترة الوصول في حسابك.',
+                        : isDailyPack
+                            ? 'أكدت Yoco الدفع. فحوصك الإضافية وعددها $dailyPackChecks متاحة لمدة ٢٤ ساعة.'
+                            : 'أكدت Yoco الدفع وتم حفظ فترة الوصول في حسابك.',
                   )
                 : AppLanguage.t(
                     error?.toString() ??
@@ -2220,6 +2274,7 @@ class _RecitationCheckScreenState extends State<RecitationCheckScreen> {
   Widget build(BuildContext context) {
     final ayahCount = selectedSurah.ayahs;
     final comparison = result?['comparison'] as Map<String, dynamic>?;
+    final allowanceSource = result?['allowanceSource'] as String?;
     return Scaffold(
       appBar: AppBar(
         title: const Text('Recitation check'),
@@ -2356,7 +2411,10 @@ class _RecitationCheckScreenState extends State<RecitationCheckScreen> {
               _resultCard(
                 'Estimated word similarity',
                 '${comparison['estimatedSimilarityPercent']}% '
-                    '(${result!['checksUsed']} of ${result!['checksLimit']} checks used)',
+                    +
+                    (allowanceSource == 'daily_pack'
+                        ? 'Additional check from a 24-hour pack'
+                        : '(${result!['checksUsed']} of ${result!['checksLimit']} checks used)'),
               ),
             Text(
               result!['disclaimer'] as String? ?? '',
@@ -2865,10 +2923,10 @@ class _ProgressScreenState extends State<ProgressScreen> {
             Text(
               AppLanguage.t(
                 checkoutAvailable
-                    ? 'Paid checkout is enabled. Purchases are one-time and do not renew automatically.'
+                    ? 'Paid plans last one month. Payments are one-time and must be renewed manually; they do not renew automatically.'
                     : 'Paid study features are implemented, but purchases stay unavailable until the payment service is enabled and verified.',
                 checkoutAvailable
-                    ? 'الدفع للخطط المدفوعة مفعّل. المشتريات لمرة واحدة ولا تتجدد تلقائياً.'
+                    ? 'تستمر الخطط المدفوعة شهراً واحداً. الدفع لمرة واحدة ويجب التجديد يدوياً؛ لا يوجد تجديد تلقائي.'
                     : 'ميزات الدراسة المدفوعة مفعّلة برمجياً، لكن الشراء غير متاح حتى تفعيل خدمة الدفع والتحقق منها.',
               ),
               textAlign: TextAlign.center,
@@ -2909,8 +2967,8 @@ class _ProgressScreenState extends State<ProgressScreen> {
                 AppLanguage.t('No ads in the current app',
                     'لا توجد إعلانات في التطبيق حالياً'),
                 AppLanguage.t(
-                    'Up to 3 estimated transcript comparisons per UTC day when recitation service is available',
-                    'حتى 3 مقارنات تقديرية للنص يومياً بالتوقيت العالمي عند توفر خدمة التلاوة'),
+                    'Five estimated transcript comparisons for the lifetime of the free account',
+                    'خمس مقارنات تقديرية للتفريغ طوال مدة الحساب المجاني'),
                 AppLanguage.t(
                     'Saved self-guided ayah recall and revision status',
                     'حفظ نتيجة استرجاع الآية ذاتياً وحالة المراجعة'),
@@ -2925,68 +2983,81 @@ class _ProgressScreenState extends State<ProgressScreen> {
               ],
             ),
             const SizedBox(height: 12),
-            _planCard(
-              title: AppLanguage.t('HifzAI Plus', 'HifzAI بلس'),
-              price: 'R199',
-              period: AppLanguage.t(
-                'one-time one-month access • R1,499 one-time for 12 months',
-                'دفع لمرة واحدة لشهر • 1,499 راند لمرة واحدة لمدة 12 شهراً',
-              ),
-              status: paidPlanStatus,
-              badge: AppLanguage.t('Recommended', 'موصى به'),
-              features: [
-                AppLanguage.t(
-                    'Up to 50 estimated transcript comparisons per UTC month when the service is enabled',
-                    'حتى 50 مقارنة تقديرية للتفريغ شهرياً بالتوقيت العالمي عند تفعيل الخدمة'),
-                AppLanguage.t(
-                    'Personalised recommendations from your saved missed ayahs',
-                    'توصيات مخصصة من الآيات التي أخطأت فيها والمحفوظه في سجلّك'),
-                AppLanguage.t(
-                    'Focused revision quiz built from your saved ayah results',
-                    'اختبار مراجعة مخصص مبني على نتائج آياتك المحفوظة'),
-                AppLanguage.t(
-                    'Approximate Arabic transcript comparison, not Tajweed grading',
-                    'مقارنة تقريبية للتفريغ العربي وليست تقييماً للتجويد'),
-              ],
+            _monthlyPlanCard(
+              title: AppLanguage.t('HifzAI 400', 'HifzAI ٤٠٠'),
+              price: 'R199,00',
+              monthlyChecks: 400,
+              productId: 'monthly_400',
               highlighted: true,
-              choices: checkoutAvailable
-                  ? const [
-                      MapEntry('R199 • one month', 'plus_monthly'),
-                      MapEntry('R1,499 • 12 months', 'plus_yearly'),
-                    ]
-                  : const [],
-              onChoose: _startCheckout,
-              checkoutInProgress: startingCheckout,
             ),
-            const SizedBox(height: 20),
-            _planCard(
-              title: AppLanguage.t('HifzAI Pro', 'HifzAI برو'),
-              price: 'R299',
-              period: AppLanguage.t(
-                  'one-time one-month access, no automatic renewal',
-                  'دفع لمرة واحدة لشهر دون تجديد تلقائي'),
-              status: paidPlanStatus,
-              features: [
-                AppLanguage.t(
-                    'Up to 150 estimated transcript comparisons per UTC month when the service is enabled',
-                    'حتى 150 مقارنة تقديرية للتفريغ شهرياً بالتوقيت العالمي عند تفعيل الخدمة'),
-                AppLanguage.t(
-                    'Everything included in Plus', 'كل ما تتضمنه خطة بلس'),
-                AppLanguage.t('Performance report from your saved quiz results',
-                    'تقرير أداء من نتائج اختباراتك المحفوظة'),
-                AppLanguage.t(
-                    'Per-Surah quiz accuracy report and a custom 10-ayah revision session',
-                    'تقرير دقة الاختبارات لكل سورة وجلسة مراجعة مخصصة لعشر آيات'),
-                AppLanguage.t(
-                    'Limits and paid access are verified and enforced by the server',
-                    'يتحقق الخادم من حدود الاستخدام والوصول المدفوع ويفرضها'),
-              ],
-              choices: checkoutAvailable
-                  ? const [MapEntry('R299 • one month', 'pro_monthly')]
-                  : const [],
-              onChoose: _startCheckout,
-              checkoutInProgress: startingCheckout,
+            const SizedBox(height: 12),
+            _monthlyPlanCard(
+              title: AppLanguage.t('HifzAI 700', 'HifzAI ٧٠٠'),
+              price: 'R299,00',
+              monthlyChecks: 700,
+              productId: 'monthly_700',
             ),
+            const SizedBox(height: 12),
+            _monthlyPlanCard(
+              title: AppLanguage.t('HifzAI 1,000', 'HifzAI ١٬٠٠٠'),
+              price: 'R399,00',
+              monthlyChecks: 1000,
+              productId: 'monthly_1000',
+            ),
+            if (entitlementFuture != null)
+              FutureBuilder<Map<String, dynamic>>(
+                future: entitlementFuture,
+                builder: (context, snapshot) {
+                  if (snapshot.data?['canBuyDailyPacks'] != true ||
+                      !checkoutAvailable) {
+                    return const SizedBox.shrink();
+                  }
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 20),
+                    child: _planCard(
+                      title: AppLanguage.t(
+                        'Extra recitation packs',
+                        'حزم تلاوة إضافية',
+                      ),
+                      price: AppLanguage.t('Choose a pack', 'اختر حزمة'),
+                      period: AppLanguage.t(
+                        'One-time purchase • each pack expires 24 hours after payment',
+                        'شراء لمرة واحدة • تنتهي صلاحية كل حزمة بعد ٢٤ ساعة من الدفع',
+                      ),
+                      status: AppLanguage.t(
+                        'Your monthly allowance is used. Choose a pack to keep practising.',
+                        'استخدمت رصيدك الشهري. اختر حزمة لمواصلة التدريب.',
+                      ),
+                      features: [
+                        AppLanguage.t(
+                          'The 50- and 100-check packs can only be bought after the monthly allowance is used. Multiple active packs combine.',
+                          'لا يمكن شراء حزم ٥٠ أو ١٠٠ فحص إلا بعد استخدام الرصيد الشهري. تتجمع الفحوص من الحزم النشطة.',
+                        ),
+                      ],
+                      choices: checkoutAvailable
+                          ? [
+                              MapEntry(
+                                AppLanguage.t(
+                                  'R39,99 • 50 checks • 24 hours',
+                                  'R39,99 • ٥٠ فحصاً • ٢٤ ساعة',
+                                ),
+                                'daily_50',
+                              ),
+                              MapEntry(
+                                AppLanguage.t(
+                                  'R89,99 • 100 checks • 24 hours',
+                                  'R89,99 • ١٠٠ فحص • ٢٤ ساعة',
+                                ),
+                                'daily_100',
+                              ),
+                            ]
+                          : const [],
+                      onChoose: _startCheckout,
+                      checkoutInProgress: startingCheckout,
+                    ),
+                  );
+                },
+              ),
             const SizedBox(height: 20),
             Text(
               AppLanguage.t(
@@ -3003,11 +3074,65 @@ class _ProgressScreenState extends State<ProgressScreen> {
   bool get checkoutAvailable =>
       paidCheckoutEnabled && checkoutStatusLoaded && serverCheckoutEnabled;
 
+  Widget _monthlyPlanCard({
+    required String title,
+    required String price,
+    required int monthlyChecks,
+    required String productId,
+    bool highlighted = false,
+  }) =>
+      _planCard(
+        title: title,
+        price: price,
+        period: AppLanguage.t(
+          'per month • manual one-time renewal',
+          'شهرياً • تجديد يدوي بدفعة واحدة',
+        ),
+        status: paidPlanStatus,
+        badge: highlighted ? AppLanguage.t('Recommended', 'موصى به') : null,
+        features: [
+          AppLanguage.t(
+            '$monthlyChecks estimated recitation checks per paid month',
+            '$monthlyChecks فحص تلاوة تقديري لكل شهر مدفوع',
+          ),
+          AppLanguage.t(
+            'Personalised recommendations and focused revision quizzes from saved results',
+            'توصيات مخصصة واختبارات مراجعة من النتائج المحفوظة',
+          ),
+          AppLanguage.t(
+            'Per-Surah accuracy report and custom revision sessions',
+            'تقرير الدقة لكل سورة وجلسات مراجعة مخصصة',
+          ),
+          AppLanguage.t(
+            'Unused monthly checks do not roll over; renew manually with another one-time payment',
+            'لا تنتقل الفحوص الشهرية غير المستخدمة؛ جدد يدوياً بدفعة واحدة جديدة',
+          ),
+          AppLanguage.t(
+            'Transcript comparison is an estimate, not Tajweed grading',
+            'مقارنة التفريغ تقديرية وليست تقييماً للتجويد',
+          ),
+        ],
+        highlighted: highlighted,
+        choices: checkoutAvailable
+            ? [
+                MapEntry(
+                  AppLanguage.t(
+                    '$price • $monthlyChecks checks/month',
+                    '$price • $monthlyChecks فحصاً/شهرياً',
+                  ),
+                  productId,
+                ),
+              ]
+            : const [],
+        onChoose: _startCheckout,
+        checkoutInProgress: startingCheckout,
+      );
+
   String get paidPlanStatus {
     if (checkoutAvailable) {
       return AppLanguage.t(
-        'Available • one-time access, no auto-renewal',
-        'متاح • وصول بدفع لمرة واحدة دون تجديد تلقائي',
+        'Available • one-month access, manual renewal',
+        'متاح • وصول لشهر واحد، وتجديد يدوي',
       );
     }
     if (checkoutStatusError != null) {
@@ -3075,7 +3200,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
             builder: (context, entitlementSnapshot) {
               final plan = entitlementSnapshot.data?['plan'] as String?;
               final isPlus = plan == 'plus' || plan == 'pro';
-              final isPro = plan == 'pro';
+              final isPro = isPlus;
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -3102,7 +3227,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
                   ] else if (!isPlus) ...[
                     const SizedBox(height: 12),
                     const Text(
-                      'Personalised revision recommendations are included with Plus and Pro.',
+                      'Personalised revision recommendations and per-Surah reports are included with every paid monthly plan.',
                       style: TextStyle(color: C.cream),
                     ),
                   ],
@@ -3260,14 +3385,28 @@ class _ProgressScreenState extends State<ProgressScreen> {
           final expiry =
               expiresAt == null ? null : DateTime.tryParse(expiresAt);
           final plan = data?['plan'] as String?;
-          final message = snapshot.hasError
+          final recitationLimit = data?['recitationLimit'] as int?;
+          final recitationsUsed = data?['recitationsUsed'] as int? ?? 0;
+          final dailyPackRemaining = data?['dailyPackRemaining'] as int? ?? 0;
+          final dailyPackExpiresAt = data?['dailyPackExpiresAt'] as String?;
+          final dailyPackExpiry = dailyPackExpiresAt == null
+              ? null
+              : DateTime.tryParse(dailyPackExpiresAt);
+          final accessMessage = snapshot.hasError
               ? 'Could not load saved plan: ${snapshot.error}'
               : snapshot.connectionState != ConnectionState.done
                   ? 'Loading your saved access…'
                   : plan == 'free'
-                      ? 'Your account is on the Free plan.'
-                      : 'Your ${plan?.toUpperCase()} access is saved until '
+                      ? 'Free plan: $recitationsUsed of 5 lifetime recitation checks used.'
+                      : 'Paid access: $recitationsUsed of '
+                          '${recitationLimit ?? 'your'} monthly checks used. '
+                          'Access is saved until '
                           '${expiry?.toLocal().toString().split(' ').first ?? 'the expiry date'}.';
+          final packMessage = dailyPackRemaining == 0
+              ? ''
+              : ' You also have $dailyPackRemaining extra checks; the earliest pack expires '
+                  '${dailyPackExpiry?.toLocal().toString() ?? 'soon'}.';
+          final message = '$accessMessage$packMessage';
           return Container(
             padding: const EdgeInsets.all(14),
             decoration: BoxDecoration(
@@ -3282,11 +3421,11 @@ class _ProgressScreenState extends State<ProgressScreen> {
                 Expanded(
                     child:
                         Text(message, style: const TextStyle(color: C.cream))),
-                IconButton(
-                  tooltip: 'Refresh plan status',
+                TextButton.icon(
                   onPressed: () => setState(() =>
                       entitlementFuture = PaymentService.getEntitlement()),
-                  icon: const Icon(Icons.refresh_rounded, color: C.goldLight),
+                  icon: const Icon(Icons.refresh_rounded),
+                  label: Text(AppLanguage.t('Refresh', 'تحديث')),
                 ),
               ],
             ),

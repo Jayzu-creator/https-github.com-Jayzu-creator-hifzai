@@ -14,10 +14,70 @@ const recitationEnabled = process.env.RECITATION_ENABLED === 'true';
 const checkoutRequests = new Map();
 const recitationRequests = new Map();
 
-const plans = Object.freeze({
-  plus_monthly: { amount: 19900, name: 'HifzAI Plus Monthly', plan: 'plus', months: 1 },
-  plus_yearly: { amount: 149900, name: 'HifzAI Plus Yearly', plan: 'plus', months: 12 },
-  pro_monthly: { amount: 29900, name: 'HifzAI Pro Monthly', plan: 'pro', months: 1 },
+const products = Object.freeze({
+  monthly_400: {
+    amount: 19900,
+    name: 'HifzAI Monthly 400',
+    kind: 'subscription',
+    plan: 'plus',
+    months: 1,
+    monthlyLimit: 400,
+  },
+  monthly_700: {
+    amount: 29900,
+    name: 'HifzAI Monthly 700',
+    kind: 'subscription',
+    plan: 'plus',
+    months: 1,
+    monthlyLimit: 700,
+  },
+  monthly_1000: {
+    amount: 39900,
+    name: 'HifzAI Monthly 1000',
+    kind: 'subscription',
+    plan: 'plus',
+    months: 1,
+    monthlyLimit: 1000,
+  },
+  daily_50: {
+    amount: 3999,
+    name: 'HifzAI 50 Recitation Pack',
+    kind: 'daily_pack',
+    checks: 50,
+  },
+  daily_100: {
+    amount: 8999,
+    name: 'HifzAI 100 Recitation Pack',
+    kind: 'daily_pack',
+    checks: 100,
+  },
+});
+
+const historicalProducts = Object.freeze({
+  plus_monthly: {
+    amount: 19900,
+    name: 'HifzAI Plus Monthly',
+    kind: 'subscription',
+    plan: 'plus',
+    months: 1,
+    monthlyLimit: 50,
+  },
+  plus_yearly: {
+    amount: 149900,
+    name: 'HifzAI Plus Yearly',
+    kind: 'subscription',
+    plan: 'plus',
+    months: 12,
+    monthlyLimit: 50,
+  },
+  pro_monthly: {
+    amount: 29900,
+    name: 'HifzAI Pro Monthly',
+    kind: 'subscription',
+    plan: 'pro',
+    months: 1,
+    monthlyLimit: 150,
+  },
 });
 
 function json(res, status, body) {
@@ -143,29 +203,117 @@ async function getSubscription(userId) {
   };
 }
 
+async function getCurrentBillingPeriod(userId, subscription) {
+  if (!subscription.active) {
+    return {
+      monthlyLimit: 5,
+      periodStart: '1970-01-01T00:00:00.000Z',
+      periodEnd: null,
+      isFree: true,
+    };
+  }
+
+  const now = new Date().toISOString();
+  const rows = await supabaseRequest(
+    `subscription_payments?user_id=eq.${encodeURIComponent(userId)}&starts_at=lte.${encodeURIComponent(now)}&expires_at=gt.${encodeURIComponent(now)}&select=plan,monthly_recitations,starts_at,expires_at&order=starts_at.desc&limit=1`,
+  );
+  const period = rows?.[0];
+  if (!period) {
+    throw new Error('The active paid access period could not be found.');
+  }
+
+  const legacyLimit = period.plan === 'pro' ? 150 : 50;
+  const monthlyLimit = period.monthly_recitations || legacyLimit;
+  const hasNewMonthlyLimit = period.monthly_recitations > 0;
+  const nowDate = new Date();
+  const legacyPeriodStart = new Date(Date.UTC(
+    nowDate.getUTCFullYear(),
+    nowDate.getUTCMonth(),
+    1,
+  )).toISOString();
+  const legacyPeriodEnd = new Date(Date.UTC(
+    nowDate.getUTCFullYear(),
+    nowDate.getUTCMonth() + 1,
+    1,
+  )).toISOString();
+
+  return {
+    monthlyLimit,
+    periodStart: hasNewMonthlyLimit ? period.starts_at : legacyPeriodStart,
+    periodEnd: hasNewMonthlyLimit ? period.expires_at : legacyPeriodEnd,
+    isFree: false,
+  };
+}
+
+async function getRecitationStatus(userId, billingPeriod) {
+  const result = await supabaseRequest('rpc/get_recitation_status', {
+    method: 'POST',
+    body: JSON.stringify({
+      p_user_id: userId,
+      p_period_start: billingPeriod.periodStart,
+      p_period_end: billingPeriod.periodEnd,
+      p_is_free: billingPeriod.isFree,
+    }),
+  });
+  return Array.isArray(result) ? result[0] : result;
+}
+
+async function getUserEntitlement(userId) {
+  const subscription = await getSubscription(userId);
+  const billingPeriod = await getCurrentBillingPeriod(userId, subscription);
+  const usage = await getRecitationStatus(userId, billingPeriod);
+  const used = usage?.used ?? billingPeriod.monthlyLimit;
+  const packRemaining = usage?.pack_remaining ?? 0;
+  return {
+    ...subscription,
+    recitationLimit: billingPeriod.monthlyLimit,
+    recitationsUsed: used,
+    recitationsRemaining: Math.max(0, billingPeriod.monthlyLimit - used),
+    dailyPackRemaining: packRemaining,
+    dailyPackExpiresAt: usage?.pack_expires_at ?? null,
+    canBuyDailyPacks:
+      subscription.active && used >= billingPeriod.monthlyLimit,
+  };
+}
+
 async function activateVerifiedCheckout(purchase, userId) {
-  const plan = plans[purchase.plan];
-  if (!plan || purchase.user_id !== userId || purchase.amount !== plan.amount) {
+  const product = products[purchase.plan] || historicalProducts[purchase.plan];
+  if (!product || purchase.user_id !== userId || purchase.amount !== product.amount) {
     throw new Error('Pending checkout data does not match a configured plan.');
   }
   const checkout = await yocoRequest(`/checkouts/${encodeURIComponent(purchase.checkout_id)}`);
   if (
     checkout.status !== 'completed' ||
-    checkout.amount !== plan.amount ||
+    checkout.amount !== product.amount ||
     checkout.currency !== 'ZAR' ||
     !checkout.paymentId
   ) {
     return { checkout, entitlement: null };
   }
-  const result = await supabaseRequest('rpc/activate_yoco_subscription', {
+  const activation = product.kind === 'daily_pack'
+    ? {
+        endpoint: 'rpc/activate_yoco_recitation_pack',
+        body: {
+          p_checkout_id: checkout.id,
+          p_user_id: userId,
+          p_checks: product.checks,
+          p_amount: product.amount,
+        },
+      }
+    : {
+        endpoint: 'rpc/activate_yoco_subscription',
+        body: {
+          p_checkout_id: checkout.id,
+          p_user_id: userId,
+          p_plan: product.plan,
+          p_amount: product.amount,
+          p_months: product.months,
+          p_monthly_recitations: product.monthlyLimit,
+        },
+      };
+  const result = await supabaseRequest(activation.endpoint, {
     method: 'POST',
-    body: JSON.stringify({
-      p_checkout_id: checkout.id,
-      p_user_id: userId,
-      p_plan: plan.plan,
-      p_amount: plan.amount,
-      p_months: plan.months,
-    }),
+    body: JSON.stringify(activation.body),
   });
   return {
     checkout,
@@ -312,7 +460,7 @@ const server = http.createServer(async (req, res) => {
       const user = await requireUser(req);
       if (!user) return json(res, 401, { error: 'Please sign in again.' });
       await reconcileRecentCheckouts(user.id);
-      return json(res, 200, await getSubscription(user.id));
+      return json(res, 200, await getUserEntitlement(user.id));
     }
 
     if (req.method === 'POST' && url.pathname === '/create-checkout') {
@@ -332,13 +480,16 @@ const server = http.createServer(async (req, res) => {
       }
 
       const body = await readJson(req);
-      const plan = plans[body.plan];
-      if (!plan) return json(res, 400, { error: 'Unknown payment plan.' });
+      const product = typeof body.plan === 'string' && Object.hasOwn(products, body.plan)
+        ? products[body.plan]
+        : null;
+      if (!product) return json(res, 400, { error: 'Unknown payment plan.' });
 
-      const current = await getSubscription(user.id);
-      if (current.expiresAt && current.plan !== plan.plan) {
+      const current = await getUserEntitlement(user.id);
+      if (product.kind === 'daily_pack' &&
+          (!current.active || !current.canBuyDailyPacks)) {
         return json(res, 409, {
-          error: 'You already have a different paid plan active. Renew or change plans after it expires.',
+          error: 'Daily recitation packs are available after your monthly allowance is used.',
         });
       }
       const checkoutId = crypto.randomUUID();
@@ -347,7 +498,7 @@ const server = http.createServer(async (req, res) => {
         method: 'POST',
         headers: { 'Idempotency-Key': checkoutId },
         body: JSON.stringify({
-          amount: plan.amount,
+          amount: product.amount,
           currency: 'ZAR',
           successUrl: `${siteUrl}/?payment=success`,
           cancelUrl: `${siteUrl}/?payment=cancelled`,
@@ -355,9 +506,9 @@ const server = http.createServer(async (req, res) => {
           externalId: checkoutId,
           metadata: { plan: body.plan, user_id: user.id },
           lineItems: [{
-            displayName: plan.name,
+            displayName: product.name,
             quantity: 1,
-            pricingDetails: { price: plan.amount },
+            pricingDetails: { price: product.amount },
           }],
         }),
       });
@@ -369,7 +520,7 @@ const server = http.createServer(async (req, res) => {
           checkout_id: checkout.id,
           user_id: user.id,
           plan: body.plan,
-          amount: plan.amount,
+          amount: product.amount,
           status: 'pending',
         }),
       });
@@ -435,30 +586,31 @@ const server = http.createServer(async (req, res) => {
       }
 
       const entitlement = await getSubscription(user.id);
-      const isPaid = entitlement.expiresAt != null &&
-        Date.parse(entitlement.expiresAt) > Date.now();
-      const plan = isPaid ? entitlement.plan : 'free';
-      const limit = plan === 'plus' ? 50 : plan === 'pro' ? 150 : 3;
-      const now = new Date();
-      const periodStart = plan === 'free'
-        ? new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
-        : new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+      const billingPeriod = await getCurrentBillingPeriod(user.id, entitlement);
+      const plan = entitlement.active ? entitlement.plan : 'free';
       const usage = await supabaseRequest('rpc/reserve_recitation_check', {
         method: 'POST',
         body: JSON.stringify({
           p_user_id: user.id,
-          p_limit: limit,
-          p_period_start: periodStart.toISOString(),
+          p_limit: billingPeriod.monthlyLimit,
+          p_period_start: billingPeriod.periodStart,
+          p_period_end: billingPeriod.periodEnd,
+          p_is_free: billingPeriod.isFree,
         }),
       });
       const reservation = Array.isArray(usage) ? usage[0] : usage;
       if (!reservation?.accepted) {
+        const canBuyDailyPacks = entitlement.active &&
+          reservation?.used >= billingPeriod.monthlyLimit;
         return json(res, 429, {
-          error: plan === 'free'
-            ? 'Your 3 free daily checks have been used. Try again tomorrow or see HifzAI plans.'
-            : 'Your monthly recitation-check allowance has been used.',
-          used: reservation?.used ?? limit,
-          limit,
+          error: billingPeriod.isFree
+            ? 'Your five free recitation checks have been used.'
+            : canBuyDailyPacks
+                ? 'Your monthly allowance is used. You can buy a 24-hour recitation pack from Your Journey.'
+                : 'Your monthly recitation-check allowance has been used.',
+          used: reservation?.used ?? billingPeriod.monthlyLimit,
+          limit: billingPeriod.monthlyLimit,
+          canBuyDailyPacks,
         });
       }
 
@@ -486,7 +638,9 @@ const server = http.createServer(async (req, res) => {
           reference,
           comparison,
           checksUsed: reservation.used,
-          checksLimit: limit,
+          checksLimit: billingPeriod.monthlyLimit,
+          allowanceSource: reservation.source,
+          dailyPackRemaining: reservation.pack_remaining ?? 0,
           plan,
           disclaimer: 'Automated speech transcription can be inaccurate. This is not a Tajweed grade or a religious ruling. Ask a qualified Quran teacher to review your recitation.',
         });

@@ -163,6 +163,18 @@ void main() {
     expect(find.byType(HifzAIApp), findsOneWidget);
   });
 
+  testWidgets('offers confirmation email resend from sign-in screen',
+      (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(home: SignInScreen()),
+    );
+
+    expect(find.text('Resend confirmation email'), findsOneWidget);
+    await tester.tap(find.text('New here? Create an account'));
+    await tester.pump();
+    expect(find.text('Resend confirmation email'), findsNothing);
+  });
+
   testWidgets('shows implemented paid features and honest availability',
       (tester) async {
     await tester.pumpWidget(
@@ -174,16 +186,16 @@ void main() {
     expect(find.text('HifzAI Free'), findsOneWidget);
     expect(find.text('R0 • Free forever'), findsOneWidget);
     await tester.scrollUntilVisible(
-      find.text('HifzAI Plus'),
+      find.text('HifzAI 400'),
       300,
       scrollable: find.byType(Scrollable).first,
     );
-    expect(find.text('HifzAI Plus'), findsOneWidget);
+    expect(find.text('HifzAI 400'), findsOneWidget);
     expect(
-      find.text(
-          'R199 • one-time one-month access • R1,499 one-time for 12 months'),
+      find.text('R199,00 • per month • manual one-time renewal'),
       findsOneWidget,
     );
+    expect(find.textContaining('400 estimated recitation checks'), findsOneWidget);
     expect(find.text('Recommended'), findsOneWidget);
     expect(
       find.text('Study tools ready • live services disabled'),
@@ -191,26 +203,33 @@ void main() {
     );
     expect(
       find.textContaining(
-          'Personalised recommendations from your saved missed ayahs'),
+          'Personalised recommendations and focused revision quizzes'),
       findsOneWidget,
     );
     expect(find.textContaining('Planned:'), findsNothing);
 
     await tester.scrollUntilVisible(
-      find.text('HifzAI Pro'),
+      find.text('HifzAI 700'),
       300,
       scrollable: find.byType(Scrollable).first,
     );
-    expect(find.text('HifzAI Pro'), findsOneWidget);
     expect(
-      find.text('R299 • one-time one-month access, no automatic renewal'),
+      find.text('HifzAI 700'),
       findsOneWidget,
     );
     expect(
-      find.textContaining(
-          'Per-Surah quiz accuracy report and a custom 10-ayah revision session'),
+      find.text('R299,00 • per month • manual one-time renewal'),
       findsOneWidget,
     );
+    expect(find.textContaining('700 estimated recitation checks'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('HifzAI 1,000'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(find.text('HifzAI 1,000'), findsOneWidget);
+    expect(find.textContaining('1,000 estimated recitation checks'), findsOneWidget);
+    expect(find.text('Extra recitation packs'), findsNothing);
     expect(find.textContaining('Planned:'), findsNothing);
     expect(find.text('Choose'), findsNothing);
   });

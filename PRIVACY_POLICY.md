@@ -10,12 +10,12 @@ and may not be available in every release.
 
 If you create an account, Supabase processes your email address, authentication
 credentials, and account identifiers so HifzAI can sign you in. HifzAI's server
-stores payment checkout references, plan access dates, and recitation-check usage
-against your account. Your quiz result for each ayah (remembered or needs revision)
-is saved to your account to show progress and, for eligible plans, generate
-personalised revision recommendations and reports. Yoco processes payment
-information directly during checkout; HifzAI does not receive or store your full
-card details.
+stores payment checkout references, plan access dates, recitation-check usage,
+and any purchased add-on pack balances and expiry times against your account. Your
+quiz result for each ayah (remembered or needs revision) is saved to your account
+to show progress and generate personalised revision recommendations and reports
+while you have paid access. Yoco processes payment information directly during
+checkout; HifzAI does not receive or store your full card details.
 
 ## Microphone and recitation transcription
 

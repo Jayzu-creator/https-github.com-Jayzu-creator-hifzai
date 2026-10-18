@@ -9,27 +9,25 @@ HifzAI is a Quran reading and memorisation companion built with Flutter.
 - Bilingual English/Arabic interface and Tajweed learning guide
 - Email/password accounts with Supabase Auth
 - Consent-based short recitation recording and approximate transcript comparison
-- Server-side plan periods and recitation usage quotas
-- Plus revision recommendations and Pro per-Surah accuracy reports with focused revision quizzes
+- Server-enforced lifetime free allowance, monthly plan limits, and 24-hour add-on packs
+- Paid revision recommendations, per-Surah accuracy reports, and focused revision quizzes
 
 The memorisation quiz asks learners to choose the next ayah from four choices,
 using the complete Quran text stored in the app. The recitation tool compares an
 Arabic speech transcript with the selected ayah. It is an estimate, not a Tajweed
-assessment or religious ruling. Payment checkout is currently disabled. Yoco
-charges are one-time: paid access lasts one or twelve calendar months and does not
-renew automatically. Live checkout has not yet been deployed; the backend
-configuration targets Yoco test mode, not live charges.
+assessment or religious ruling. Free accounts receive five recitation checks total.
+Paid monthly packages include 400, 700, or 1,000 checks and the same study tools.
+Yoco charges each purchase once; customers manually renew monthly access because
+the documented Yoco Checkout API does not provide automatic recurring charges.
+When a paid monthly allowance is exhausted, users can buy a 50-check pack for
+R39,99 or a 100-check pack for R89,99. Each add-on pack expires 24 hours after
+payment is verified; multiple active packs add together.
 
-Plus and Pro include respectively 50 and 150 estimated transcript comparisons per
-UTC month when the recitation service is enabled. Plus recommendations and Pro
-performance reports are based on the learner's saved quiz outcomes; focused
-revision quizzes target ayahs marked for review. These features do not provide
-Tajweed or pronunciation grading. The live backend currently reports paid checkout
-and recitation as disabled. The deployment configuration now enables Yoco test
-checkout and consent-based test recitation; it must be redeployed before the
-feature flags can take effect. Each submitted recording is sent to OpenAI and may
-incur API charges. Verify the test payment and recording flows before any live
-launch.
+All paid monthly packages include personalised recommendations, per-Surah
+performance reports, and focused revision quizzes based on saved quiz outcomes.
+These features do not provide Tajweed or pronunciation grading. Each submitted
+recording is sent to OpenAI and may incur API charges. Verify test payments,
+entitlement periods, usage limits, and recording flows before any live launch.
 
 ## Support and privacy
 
@@ -79,14 +77,16 @@ and anon key from the backend's `/public-config` endpoint. The anon key is
 publishable and is protected by Supabase row-level security; the service-role key
 is never returned by that endpoint.
 
-The backend defines R199 for one month of Plus, R1,499 for twelve months of Plus,
-and R299 for one month of Pro. `ENABLE_PAID_CHECKOUT=true` only adds the client-side
-purchase buttons; checkout still requires `PAID_PLANS_ENABLED=true` on Render.
+The backend defines one-month plans of R199,00 for 400 checks, R299,00 for 700,
+and R399,00 for 1,000, plus 24-hour add-on packs of R39,99 for 50 checks and
+R89,99 for 100. `ENABLE_PAID_CHECKOUT=true` only adds the client-side purchase
+buttons; checkout still requires `PAID_PLANS_ENABLED=true` on Render.
 The Render blueprint enables checkout only for the user-confirmed Yoco test-key
-setup and enables consent-based recitation testing. Keep live Yoco credentials
-disabled and do not switch to production until the schema, test checkout, OpenAI
-transcription, provider settings, and complete release have been verified. A
-success redirect alone is never proof of payment.
+setup and enables consent-based recitation testing. Monthly access is a one-time
+charge for one month and must be renewed manually; it does not auto-renew. Keep
+live Yoco credentials disabled and do not switch to production until the schema,
+test checkout, OpenAI transcription, provider settings, and complete release have
+been verified. A success redirect alone is never proof of payment.
 
 ## Quran text and attribution
 
