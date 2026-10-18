@@ -796,6 +796,9 @@ class AuthGate extends StatelessWidget {
           );
         }
         if (snapshot.data?.session == null) return const SignInScreen();
+        if (snapshot.data?.event == AuthChangeEvent.passwordRecovery) {
+          return const PasswordRecoveryScreen();
+        }
         return const PaymentReturnGate();
       },
     );
@@ -907,6 +910,42 @@ class _SignInScreenState extends State<SignInScreen> {
     }
   }
 
+  Future<void> sendPasswordReset() async {
+    final email = emailController.text.trim();
+    if (email.isEmpty) {
+      setState(() => message = AppLanguage.t(
+            'Enter your email address first.',
+            'أدخل عنوان بريدك الإلكتروني أولاً.',
+          ));
+      return;
+    }
+
+    setState(() {
+      loading = true;
+      message = null;
+    });
+    try {
+      await Supabase.instance.client.auth.resetPasswordForEmail(
+        email,
+        redirectTo: Uri.base.origin + Uri.base.path,
+      );
+      if (mounted) {
+        setState(() => message = AppLanguage.t(
+              'If an account exists for that email, a password reset link has been sent. Check your inbox and spam folder.',
+              'إذا كان لهذا البريد حساب، فسيتم إرسال رابط إعادة تعيين كلمة المرور. تحقق من صندوق الوارد والبريد العشوائي.',
+            ));
+      }
+    } on AuthException catch (error) {
+      if (mounted) setState(() => message = error.message);
+    } catch (error) {
+      if (mounted) {
+        setState(() => message = 'Could not send password reset email: $error');
+      }
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
   @override
   void dispose() {
     emailController.dispose();
@@ -978,6 +1017,14 @@ class _SignInScreenState extends State<SignInScreen> {
                     onPressed: loading ? () {} : submit,
                   ),
                   if (!createAccount)
+                    TextButton(
+                      onPressed: loading ? null : sendPasswordReset,
+                      child: Text(AppLanguage.t(
+                        'Forgot password?',
+                        'هل نسيت كلمة المرور؟',
+                      )),
+                    ),
+                  if (!createAccount)
                     TextButton.icon(
                       onPressed: loading ? null : resendConfirmation,
                       icon: const Icon(Icons.mark_email_unread_outlined),
@@ -1023,6 +1070,113 @@ class PaymentReturnGate extends StatelessWidget {
     }
     return const SplashScreen();
   }
+}
+
+class PasswordRecoveryScreen extends StatefulWidget {
+  const PasswordRecoveryScreen({super.key});
+
+  @override
+  State<PasswordRecoveryScreen> createState() =>
+      _PasswordRecoveryScreenState();
+}
+
+class _PasswordRecoveryScreenState extends State<PasswordRecoveryScreen> {
+  final passwordController = TextEditingController();
+  final confirmPasswordController = TextEditingController();
+  bool loading = false;
+  String? message;
+
+  Future<void> updatePassword() async {
+    if (passwordController.text.length < 6) {
+      setState(() => message = AppLanguage.t(
+            'Choose a password with at least 6 characters.',
+            'اختر كلمة مرور تتكون من ٦ أحرف على الأقل.',
+          ));
+      return;
+    }
+    if (passwordController.text != confirmPasswordController.text) {
+      setState(() => message = AppLanguage.t(
+            'The passwords do not match.',
+            'كلمتا المرور غير متطابقتين.',
+          ));
+      return;
+    }
+
+    setState(() {
+      loading = true;
+      message = null;
+    });
+    try {
+      await Supabase.instance.client.auth.updateUser(
+        UserAttributes(password: passwordController.text),
+      );
+    } on AuthException catch (error) {
+      if (mounted) setState(() => message = error.message);
+    } catch (error) {
+      if (mounted) setState(() => message = 'Could not update password: $error');
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    passwordController.dispose();
+    confirmPasswordController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        backgroundColor: C.emeraldDark,
+        body: SafeArea(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 440),
+              child: ListView(
+                padding: const EdgeInsets.all(24),
+                shrinkWrap: true,
+                children: [
+                  const Icon(Icons.menu_book_rounded, size: 68, color: C.gold),
+                  const SizedBox(height: 16),
+                  Text(
+                    AppLanguage.t('Set a new password', 'عيّن كلمة مرور جديدة'),
+                    textAlign: TextAlign.center,
+                    style: serif(28, w: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 26),
+                  TextField(
+                    controller: passwordController,
+                    obscureText: true,
+                    decoration:
+                        const InputDecoration(labelText: 'New password'),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: confirmPasswordController,
+                    obscureText: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Confirm new password',
+                    ),
+                  ),
+                  if (message != null) ...[
+                    const SizedBox(height: 12),
+                    Text(message!, style: const TextStyle(color: C.goldLight)),
+                  ],
+                  const SizedBox(height: 20),
+                  GoldButton(
+                    label: loading
+                        ? AppLanguage.t('Please wait…', 'يرجى الانتظار…')
+                        : AppLanguage.t('Save new password', 'احفظ كلمة المرور'),
+                    icon: Icons.lock_reset_rounded,
+                    onPressed: loading ? () {} : updatePassword,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
 }
 
 class PaymentReturnScreen extends StatefulWidget {

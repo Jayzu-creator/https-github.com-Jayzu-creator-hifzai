@@ -170,9 +170,22 @@ void main() {
     );
 
     expect(find.text('Resend confirmation email'), findsOneWidget);
+    expect(find.text('Forgot password?'), findsOneWidget);
     await tester.tap(find.text('New here? Create an account'));
     await tester.pump();
     expect(find.text('Resend confirmation email'), findsNothing);
+    expect(find.text('Forgot password?'), findsNothing);
+  });
+
+  testWidgets('shows the password recovery form', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(home: PasswordRecoveryScreen()),
+    );
+
+    expect(find.text('Set a new password'), findsOneWidget);
+    expect(find.text('New password'), findsOneWidget);
+    expect(find.text('Confirm new password'), findsOneWidget);
+    expect(find.text('Save new password'), findsOneWidget);
   });
 
   testWidgets('shows implemented paid features and honest availability',

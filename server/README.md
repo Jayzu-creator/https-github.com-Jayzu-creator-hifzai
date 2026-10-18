@@ -12,9 +12,12 @@ server; never put them in Flutter, the browser, or source control.
    monthly allowances and add-on packs.
 3. In **Authentication → URL Configuration**, set the Site URL to the deployed
    app URL and add that URL to Redirect URLs. The sign-in screen can resend a
-   pending signup confirmation: enter the account email and select **Resend
-   confirmation email**.
-4. The unauthenticated `/public-config` endpoint returns only the Supabase project
+   pending signup confirmation or request a password reset; users should enter
+   their account email and select the relevant action.
+4. Configure custom SMTP under **Authentication → Emails → SMTP Settings** for
+   reliable delivery to users. Supabase's default email service is restricted to
+   project-team addresses and has a low sending rate limit.
+5. The unauthenticated `/public-config` endpoint returns only the Supabase project
    URL and public anon key so the web app can initialize sign-in. Never return or
    bundle the service-role key; it must only be stored in Render.
 
