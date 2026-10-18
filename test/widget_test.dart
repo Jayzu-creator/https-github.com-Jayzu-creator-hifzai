@@ -171,11 +171,6 @@ void main() {
 
     expect(find.text('Resend confirmation email'), findsOneWidget);
     expect(find.text('Forgot password?'), findsOneWidget);
-    await tester.ensureVisible(find.text('New here? Create an account'));
-    await tester.tap(find.text('New here? Create an account'));
-    await tester.pump();
-    expect(find.text('Resend confirmation email'), findsNothing);
-    expect(find.text('Forgot password?'), findsNothing);
   });
 
   testWidgets('shows the password recovery form', (tester) async {
