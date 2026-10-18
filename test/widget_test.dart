@@ -171,6 +171,7 @@ void main() {
 
     expect(find.text('Resend confirmation email'), findsOneWidget);
     expect(find.text('Forgot password?'), findsOneWidget);
+    await tester.ensureVisible(find.text('New here? Create an account'));
     await tester.tap(find.text('New here? Create an account'));
     await tester.pump();
     expect(find.text('Resend confirmation email'), findsNothing);
