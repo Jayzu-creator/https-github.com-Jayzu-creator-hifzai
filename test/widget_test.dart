@@ -228,7 +228,7 @@ void main() {
       scrollable: find.byType(Scrollable).first,
     );
     expect(find.text('HifzAI 1,000'), findsOneWidget);
-    expect(find.textContaining('1,000 estimated recitation checks'), findsOneWidget);
+    expect(find.textContaining('1000 estimated recitation checks'), findsOneWidget);
     expect(find.text('Extra recitation packs'), findsNothing);
     expect(find.textContaining('Planned:'), findsNothing);
     expect(find.text('Choose'), findsNothing);
