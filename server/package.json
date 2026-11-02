@@ -5,7 +5,11 @@
   "description": "Secure HifzAI Yoco checkout proxy",
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "google-auth-library": "^10.5.0"
   },
   "engines": {
     "node": ">=20"

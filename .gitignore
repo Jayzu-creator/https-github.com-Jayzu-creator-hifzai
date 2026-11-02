@@ -40,6 +40,7 @@ migrate_working_dir/
 .dart_tool/
 .env
 server/.env
+server/*service-account*.json
 .flutter-plugins-dependencies
 .pub-cache/
 .pub/

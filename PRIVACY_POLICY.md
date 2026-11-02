@@ -17,6 +17,15 @@ to show progress and generate personalised revision recommendations and reports
 while you have paid access. Yoco processes payment information directly during
 checkout; HifzAI does not receive or store your full card details.
 
+For Android purchases, Google Play processes the subscription or in-app payment.
+The Android app sends the Google Play purchase token to HifzAI's server for
+verification. The server stores a one-way token hash and an encrypted copy of the
+token in Supabase so it can reconcile subscription status and process Google Play
+cancellation, expiration, refund, and void notifications. Purchase records are
+associated with the signed-in HifzAI account and are deleted when that account is
+deleted, subject to provider and legal retention requirements. Do not send a
+purchase token to support or share it publicly.
+
 ## Microphone and recitation transcription
 
 The microphone is used only after you select a Surah and ayah, agree to the

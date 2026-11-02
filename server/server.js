@@ -1,5 +1,17 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
+import {
+  decryptPurchaseToken,
+  encryptPurchaseToken,
+  googlePlayApi,
+  googlePlayConfigured,
+  googlePlayPackageName,
+  googlePlayProducts,
+  obfuscatedAccountId,
+  purchaseTokenHash,
+  subscriptionDisposition,
+  verifyRtdnAuthorization,
+} from './google_play.js';
 
 const port = Number(process.env.PORT || 3000);
 const yocoSecretKey = process.env.YOCO_SECRET_KEY;
@@ -13,6 +25,7 @@ const openAiApiKey = process.env.OPENAI_API_KEY;
 const recitationEnabled = process.env.RECITATION_ENABLED === 'true';
 const checkoutRequests = new Map();
 const recitationRequests = new Map();
+const googlePlayRequests = new Map();
 
 const products = Object.freeze({
   monthly_400: {
@@ -150,6 +163,13 @@ function checkoutConfigured() {
     allowedOrigin &&
     serviceConfigured(),
   );
+}
+
+function googlePlayBillingEnabled() {
+  return process.env.GOOGLE_PLAY_BILLING_ENABLED === 'true' &&
+    googlePlayConfigured() &&
+    Boolean(process.env.GOOGLE_PLAY_RTDN_AUDIENCE && process.env.GOOGLE_PLAY_RTDN_EMAIL) &&
+    serviceConfigured();
 }
 
 async function requireUser(req) {
@@ -423,6 +443,278 @@ async function yocoRequest(path, options = {}) {
   return data;
 }
 
+function googleCheckoutId(prefix, value) {
+  const hash = crypto.createHash('sha256').update(value).digest('hex');
+  return `gp_${prefix}_${hash}`;
+}
+
+function assertGooglePlayAccount(purchase, userId) {
+  const accountId =
+    purchase?.externalAccountIdentifiers?.obfuscatedExternalAccountId ??
+    purchase?.obfuscatedExternalAccountId;
+  if (accountId !== obfuscatedAccountId(userId)) {
+    throw new Error('Google Play purchase is not linked to this account.');
+  }
+}
+
+async function activateGooglePlaySubscription(userId, product, purchaseToken) {
+  const purchase = await googlePlayApi(
+    `/purchases/subscriptionsv2/tokens/${encodeURIComponent(purchaseToken)}`,
+  );
+  const item = purchase.lineItems?.find((line) => line.productId === product.productId);
+  if (!item) throw new Error('Google Play subscription product does not match.');
+  assertGooglePlayAccount(purchase, userId);
+
+  const disposition = subscriptionDisposition(
+    purchase.subscriptionState,
+    item.expiryTime,
+  );
+  if (!disposition.active) {
+    const tokenHash = purchaseTokenHash(purchaseToken);
+    const registered = await supabaseRequest(
+      `google_play_purchases?token_hash=eq.${tokenHash}&select=token_hash`,
+    );
+    if (registered?.length) {
+      await supabaseRequest('rpc/update_google_play_purchase_state', {
+        method: 'POST',
+        body: JSON.stringify({
+          p_token_hash: tokenHash,
+          p_purchase_state: purchase.subscriptionState || 'UNKNOWN',
+          p_expires_at: disposition.expiresAt,
+          p_revoked: disposition.revoked,
+        }),
+      });
+    }
+    return { active: false, state: purchase.subscriptionState };
+  }
+
+  const orderId = item.latestSuccessfulOrderId || purchase.latestOrderId;
+  if (typeof orderId !== 'string' || !orderId.startsWith('GPA.')) {
+    throw new Error('Google Play subscription order is not yet confirmed.');
+  }
+
+  const tokenHash = purchaseTokenHash(purchaseToken);
+  const encryptedToken = encryptPurchaseToken(
+    purchaseToken,
+    process.env.GOOGLE_PLAY_TOKEN_ENCRYPTION_KEY,
+  );
+  await supabaseRequest('rpc/activate_google_play_subscription', {
+    method: 'POST',
+    body: JSON.stringify({
+      p_order_id: orderId,
+      p_checkout_id: googleCheckoutId('sub', orderId),
+      p_token_hash: tokenHash,
+      p_encrypted_purchase_token: encryptedToken,
+      p_user_id: userId,
+      p_product_id: product.productId,
+      p_purchase_state: purchase.subscriptionState,
+      p_expires_at: disposition.expiresAt,
+    }),
+  });
+  await supabaseRequest('rpc/update_google_play_purchase_state', {
+    method: 'POST',
+    body: JSON.stringify({
+      p_token_hash: tokenHash,
+      p_purchase_state: purchase.subscriptionState,
+      p_expires_at: disposition.expiresAt,
+      p_revoked: false,
+    }),
+  });
+
+  if (purchase.acknowledgementState !== 'ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED') {
+    await googlePlayApi(
+      `/purchases/subscriptions/${encodeURIComponent(product.productId)}/tokens/${encodeURIComponent(purchaseToken)}:acknowledge`,
+      { method: 'POST', body: JSON.stringify({}) },
+    );
+  }
+  return {
+    active: true,
+    expiresAt: disposition.expiresAt,
+    autoRenewing: item.autoRenewingPlan?.autoRenewEnabled === true,
+    state: purchase.subscriptionState,
+  };
+}
+
+async function activateGooglePlayPack(userId, product, purchaseToken) {
+  const purchase = await googlePlayApi(
+    `/purchases/products/${encodeURIComponent(product.productId)}/tokens/${encodeURIComponent(purchaseToken)}`,
+  );
+  if (
+    purchase.productId !== product.productId ||
+    purchase.purchaseState !== 0 ||
+    typeof purchase.orderId !== 'string' ||
+    !purchase.orderId.startsWith('GPA.')
+  ) {
+    throw new Error('Google Play add-on purchase is not complete.');
+  }
+  assertGooglePlayAccount(purchase, userId);
+
+  const tokenHash = purchaseTokenHash(purchaseToken);
+  const encryptedToken = encryptPurchaseToken(
+    purchaseToken,
+    process.env.GOOGLE_PLAY_TOKEN_ENCRYPTION_KEY,
+  );
+  await supabaseRequest('rpc/activate_google_play_recitation_pack', {
+    method: 'POST',
+    body: JSON.stringify({
+      p_order_id: purchase.orderId,
+      p_checkout_id: googleCheckoutId('pack', tokenHash),
+      p_token_hash: tokenHash,
+      p_encrypted_purchase_token: encryptedToken,
+      p_user_id: userId,
+      p_product_id: product.productId,
+    }),
+  });
+
+  if (purchase.consumptionState !== 1) {
+    await googlePlayApi(
+      `/purchases/products/${encodeURIComponent(product.productId)}/tokens/${encodeURIComponent(purchaseToken)}:consume`,
+      { method: 'POST', body: JSON.stringify({}) },
+    );
+  }
+  return { active: true };
+}
+
+async function processGooglePlayPurchase(userId, productId, purchaseToken) {
+  if (!googlePlayBillingEnabled()) {
+    throw new Error('Google Play billing is not configured.');
+  }
+  if (
+    typeof productId !== 'string' ||
+    typeof purchaseToken !== 'string' ||
+    purchaseToken.length < 20 ||
+    purchaseToken.length > 4096 ||
+    /[\r\n]/.test(purchaseToken)
+  ) {
+    throw new Error('Google Play purchase data is invalid.');
+  }
+  const product = googlePlayProducts[productId];
+  if (!product) throw new Error('Unknown Google Play product.');
+  const tokenHash = purchaseTokenHash(purchaseToken);
+  const rows = await supabaseRequest(
+    `google_play_purchases?token_hash=eq.${tokenHash}&select=user_id`,
+  );
+  if (rows?.[0] && rows[0].user_id !== userId) {
+    throw new Error('Google Play purchase is already linked to another account.');
+  }
+  if (product.kind === 'subscription' && !rows?.length) {
+    const subscription = await getSubscription(userId);
+    if (subscription.active) {
+      throw new Error('An existing paid access period must end before a new Play subscription starts.');
+    }
+  }
+  if (product.kind === 'daily_pack' && !rows?.length) {
+    const entitlement = await getUserEntitlement(userId);
+    if (!entitlement.active || !entitlement.canBuyDailyPacks) {
+      throw new Error('Google Play add-on packs require an active plan with no monthly checks remaining.');
+    }
+  }
+
+  const result = product.kind === 'subscription'
+    ? await activateGooglePlaySubscription(userId, product, purchaseToken)
+    : await activateGooglePlayPack(userId, product, purchaseToken);
+  if (!result.active) {
+    throw new Error('Google Play subscription is not currently entitled.');
+  }
+  const entitlement = await getUserEntitlement(userId);
+  return {
+    ...entitlement,
+    ...(product.kind === 'subscription'
+      ? {
+          googlePlayAutoRenewing: result.autoRenewing,
+          googlePlaySubscriptionState: result.state,
+        }
+      : {}),
+  };
+}
+
+async function reconcileGooglePlayPurchases(userId) {
+  if (!googlePlayBillingEnabled()) return;
+  try {
+    const rows = await supabaseRequest('rpc/get_google_play_subscription_to_reconcile', {
+      method: 'POST',
+      body: JSON.stringify({ p_user_id: userId }),
+    });
+    for (const row of rows || []) {
+      const purchaseToken = decryptPurchaseToken(
+        row.encrypted_purchase_token,
+        process.env.GOOGLE_PLAY_TOKEN_ENCRYPTION_KEY,
+      );
+      if (googlePlayProducts[row.product_id]) {
+        return await activateGooglePlaySubscription(
+          userId,
+          googlePlayProducts[row.product_id],
+          purchaseToken,
+        );
+      }
+    }
+  } catch (error) {
+    console.error('Google Play entitlement reconciliation failed:', error.message);
+  }
+  return null;
+}
+
+async function processGooglePlayRtdn(payload) {
+  const notification = payload.subscriptionNotification ||
+    payload.oneTimeProductNotification;
+  if (notification?.purchaseToken) {
+    const tokenHash = purchaseTokenHash(notification.purchaseToken);
+    const rows = await supabaseRequest(
+      `google_play_purchases?token_hash=eq.${tokenHash}&select=user_id,product_id,purchase_kind`,
+    );
+    const purchase = rows?.[0];
+    if (!purchase) return;
+    if (purchase.purchase_kind === 'subscription') {
+      const product = googlePlayProducts[purchase.product_id];
+      await activateGooglePlaySubscription(
+        purchase.user_id,
+        product,
+        notification.purchaseToken,
+      );
+      return;
+    }
+    const state = await googlePlayApi(
+      `/purchases/products/${encodeURIComponent(purchase.product_id)}/tokens/${encodeURIComponent(notification.purchaseToken)}`,
+    );
+    if (state.purchaseState !== 0) {
+      await supabaseRequest('rpc/update_google_play_purchase_state', {
+        method: 'POST',
+        body: JSON.stringify({
+          p_token_hash: tokenHash,
+          p_purchase_state: 'CANCELED',
+          p_expires_at: null,
+          p_revoked: true,
+        }),
+      });
+    }
+    return;
+  }
+
+  const voided = payload.voidedPurchaseNotification;
+  if (!voided?.purchaseToken || !voided.orderId) return;
+  const tokenHash = purchaseTokenHash(voided.purchaseToken);
+  const rows = await supabaseRequest(
+    `google_play_purchases?token_hash=eq.${tokenHash}&select=purchase_kind`,
+  );
+  if (rows?.[0]?.purchase_kind === 'daily_pack') {
+    await supabaseRequest('rpc/revoke_google_play_recitation_pack', {
+      method: 'POST',
+      body: JSON.stringify({
+        p_order_id: voided.orderId,
+        p_token_hash: tokenHash,
+      }),
+    });
+  } else if (rows?.[0]?.purchase_kind === 'subscription') {
+    await supabaseRequest('rpc/revoke_google_play_subscription_order', {
+      method: 'POST',
+      body: JSON.stringify({
+        p_order_id: voided.orderId,
+        p_token_hash: tokenHash,
+      }),
+    });
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   const origin = req.headers.origin;
   cors(res, origin);
@@ -453,6 +745,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, {
         recitationEnabled: Boolean(recitationEnabled && openAiApiKey && serviceConfigured()),
         paidCheckoutEnabled: checkoutConfigured(),
+        googlePlayBillingEnabled: googlePlayBillingEnabled(),
       });
     }
 
@@ -460,7 +753,102 @@ const server = http.createServer(async (req, res) => {
       const user = await requireUser(req);
       if (!user) return json(res, 401, { error: 'Please sign in again.' });
       await reconcileRecentCheckouts(user.id);
-      return json(res, 200, await getUserEntitlement(user.id));
+      const googlePlayStatus = await reconcileGooglePlayPurchases(user.id);
+      const entitlement = await getUserEntitlement(user.id);
+      return json(res, 200, {
+        ...entitlement,
+        ...(googlePlayStatus
+          ? {
+              googlePlayAutoRenewing: googlePlayStatus.autoRenewing,
+              googlePlaySubscriptionState: googlePlayStatus.state,
+            }
+          : {}),
+      });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/google-play/verify') {
+      if (!googlePlayBillingEnabled()) {
+        return json(res, 503, { error: 'Google Play billing is not configured.' });
+      }
+      const user = await requireUser(req);
+      if (!user) return json(res, 401, { error: 'Please sign in before verifying a purchase.' });
+      if (isLimited(googlePlayRequests, user.id, 20, 60 * 1000)) {
+        return json(res, 429, { error: 'Too many Google Play verification attempts.' });
+      }
+      const body = await readJson(req);
+      try {
+        const entitlement = await processGooglePlayPurchase(
+          user.id,
+          body.productId,
+          body.purchaseToken,
+        );
+        return json(res, 200, { verified: true, entitlement });
+      } catch (error) {
+        console.error('Google Play purchase verification failed:', error.message);
+        return json(res, 422, {
+          error: 'Purchase verification is incomplete. Keep the app open and retry.',
+        });
+      }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/google-play/eligibility') {
+      if (!googlePlayBillingEnabled()) {
+        return json(res, 503, { error: 'Google Play billing is not configured.' });
+      }
+      const user = await requireUser(req);
+      if (!user) return json(res, 401, { error: 'Please sign in before choosing a plan.' });
+      if (isLimited(googlePlayRequests, user.id, 20, 60 * 1000)) {
+        return json(res, 429, { error: 'Too many Google Play eligibility checks.' });
+      }
+      const body = await readJson(req);
+      const product = googlePlayProducts[body?.productId];
+      if (!product) {
+        return json(res, 400, { error: 'Choose a valid Google Play product.' });
+      }
+      if (product.kind === 'subscription' &&
+          (await getSubscription(user.id)).active) {
+        return json(res, 409, {
+          error: 'Current paid access must expire before a new Google Play subscription starts.',
+        });
+      }
+      if (product.kind === 'daily_pack') {
+        const entitlement = await getUserEntitlement(user.id);
+        if (!entitlement.active || !entitlement.canBuyDailyPacks) {
+          return json(res, 409, {
+            error: 'Add-on packs require an active plan with no monthly checks remaining.',
+          });
+        }
+      }
+      return json(res, 200, { eligible: true });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/google-play/rtdn') {
+      if (!googlePlayBillingEnabled()) {
+        return json(res, 503, { error: 'Google Play notifications are not configured.' });
+      }
+      if (!(await verifyRtdnAuthorization(req))) {
+        return json(res, 401, { error: 'Unauthorized notification request.' });
+      }
+      const body = await readJson(req);
+      const message = body.message;
+      if (body.packageName && body.packageName !== googlePlayPackageName) {
+        return json(res, 400, { error: 'Notification package name does not match.' });
+      }
+      if (body.testNotification) return json(res, 200, { ok: true });
+      if (typeof message?.data !== 'string' || message.data.length > 20000) {
+        return json(res, 400, { error: 'Invalid notification payload.' });
+      }
+      let payload;
+      try {
+        payload = JSON.parse(Buffer.from(message.data, 'base64').toString('utf8'));
+      } catch {
+        return json(res, 400, { error: 'Invalid notification payload.' });
+      }
+      if (payload.packageName !== googlePlayPackageName) {
+        return json(res, 400, { error: 'Notification package name does not match.' });
+      }
+      await processGooglePlayRtdn(payload);
+      return json(res, 200, { ok: true });
     }
 
     if (req.method === 'POST' && url.pathname === '/create-checkout') {
@@ -470,7 +858,7 @@ const server = http.createServer(async (req, res) => {
       if (!yocoSecretKey || !appBaseUrl || !allowedOrigin || !serviceConfigured()) {
         return json(res, 503, { error: 'Payment service is not configured.' });
       }
-      if (origin && origin !== allowedOrigin) {
+      if (!origin || origin !== allowedOrigin) {
         return json(res, 403, { error: 'This website is not allowed to start checkout.' });
       }
       const user = await requireUser(req);

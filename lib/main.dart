@@ -3,9 +3,13 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
+import 'package:in_app_purchase/in_app_purchase.dart';
+import 'package:in_app_purchase_android/in_app_purchase_android.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:record/record.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -76,66 +80,66 @@ class SupabaseConfigurationErrorApp extends StatelessWidget {
 }
 
 class HifzAIBootstrap extends StatefulWidget {
-      const HifzAIBootstrap({super.key});
+  const HifzAIBootstrap({super.key});
 
-      @override
-      State<HifzAIBootstrap> createState() => _HifzAIBootstrapState();
+  @override
+  State<HifzAIBootstrap> createState() => _HifzAIBootstrapState();
 }
 
 class _HifzAIBootstrapState extends State<HifzAIBootstrap> {
-      Object? configurationError;
-      bool initialized = false;
+  Object? configurationError;
+  bool initialized = false;
 
-      @override
-      void initState() {
-        super.initState();
-        _initialize();
+  @override
+  void initState() {
+    super.initState();
+    _initialize();
+  }
+
+  Future<void> _initialize() async {
+    try {
+      if (activeSupabaseUrl.isEmpty != activeSupabaseAnonKey.isEmpty) {
+        throw const FormatException(
+            'Set both SUPABASE_URL and SUPABASE_ANON_KEY, or set neither.');
       }
-
-      Future<void> _initialize() async {
-        try {
-          if (activeSupabaseUrl.isEmpty != activeSupabaseAnonKey.isEmpty) {
-            throw const FormatException(
-                'Set both SUPABASE_URL and SUPABASE_ANON_KEY, or set neither.');
-          }
-          if (!supabaseConfigured) {
-            final publicConfig = await PaymentService.getPublicSupabaseConfig();
-            activeSupabaseUrl = publicConfig['supabaseUrl']!;
-            activeSupabaseAnonKey = publicConfig['supabaseAnonKey']!;
-          }
-          await Supabase.initialize(
-            url: activeSupabaseUrl,
-            anonKey: activeSupabaseAnonKey,
-          );
-          if (mounted) setState(() => initialized = true);
-        } catch (error) {
-          if (mounted) setState(() => configurationError = error);
-        }
+      if (!supabaseConfigured) {
+        final publicConfig = await PaymentService.getPublicSupabaseConfig();
+        activeSupabaseUrl = publicConfig['supabaseUrl']!;
+        activeSupabaseAnonKey = publicConfig['supabaseAnonKey']!;
       }
+      await Supabase.initialize(
+        url: activeSupabaseUrl,
+        anonKey: activeSupabaseAnonKey,
+      );
+      if (mounted) setState(() => initialized = true);
+    } catch (error) {
+      if (mounted) setState(() => configurationError = error);
+    }
+  }
 
-      @override
-      Widget build(BuildContext context) {
-        final error = configurationError;
-        if (error != null) {
-          return SupabaseConfigurationErrorApp(error: error);
-        }
-        if (initialized) return const HifzAIApp();
-        return const MaterialApp(
-          home: Scaffold(
-            backgroundColor: C.emeraldDark,
-            body: Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  CircularProgressIndicator(color: C.gold),
-                  SizedBox(height: 16),
-                  Text('Connecting securely to HifzAI…'),
-                ],
-              ),
-            ),
+  @override
+  Widget build(BuildContext context) {
+    final error = configurationError;
+    if (error != null) {
+      return SupabaseConfigurationErrorApp(error: error);
+    }
+    if (initialized) return const HifzAIApp();
+    return const MaterialApp(
+      home: Scaffold(
+        backgroundColor: C.emeraldDark,
+        body: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircularProgressIndicator(color: C.gold),
+              SizedBox(height: 16),
+              Text('Connecting securely to HifzAI…'),
+            ],
           ),
-        );
-      }
+        ),
+      ),
+    );
+  }
 }
 
 class C {
@@ -515,6 +519,14 @@ Uint8List pcm16ToWav(
 }
 
 class PaymentService {
+  static const googlePlayProductIds = <String>{
+    'monthly_400',
+    'monthly_700',
+    'monthly_1000',
+    'daily_50',
+    'daily_100',
+  };
+
   static const apiBaseUrl = String.fromEnvironment(
     'PAYMENTS_API_BASE_URL',
     defaultValue:
@@ -595,6 +607,35 @@ class PaymentService {
     }
   }
 
+  static Future<void> launchGooglePlayPurchase(
+    String productId,
+    ProductDetails product,
+  ) async {
+    if (!googlePlayProductIds.contains(productId) || product.id != productId) {
+      throw Exception('This Google Play product is not configured.');
+    }
+    final userId = Supabase.instance.client.auth.currentUser?.id;
+    if (userId == null) throw Exception('Sign in before choosing a plan.');
+
+    final isSubscription = productId.startsWith('monthly_');
+    final purchaseParam = GooglePlayPurchaseParam(
+      productDetails: product,
+      applicationUserName: obfuscatedPlayAccountId(userId),
+      offerToken: isSubscription && product is GooglePlayProductDetails
+          ? product.offerToken
+          : null,
+    );
+    final launched = isSubscription
+        ? await InAppPurchase.instance.buyNonConsumable(
+            purchaseParam: purchaseParam,
+          )
+        : await InAppPurchase.instance.buyConsumable(
+            purchaseParam: purchaseParam,
+            autoConsume: false,
+          );
+    if (!launched) throw Exception('Google Play did not start the purchase.');
+  }
+
   static Future<PaymentStatus> getStatus(String checkoutId) async {
     final token = accessToken;
     if (token == null) throw Exception('Sign in again to verify your payment.');
@@ -619,6 +660,58 @@ class PaymentService {
       entitlement: data['entitlement'] as Map<String, dynamic>?,
     );
   }
+
+  static Future<Map<String, dynamic>> verifyGooglePlayPurchase({
+    required String productId,
+    required String purchaseToken,
+  }) async {
+    final token = accessToken;
+    if (token == null)
+      throw Exception('Sign in again to verify your purchase.');
+    final response = await http.post(
+      Uri.parse('$apiBaseUrl/google-play/verify'),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $token',
+      },
+      body: jsonEncode({
+        'productId': productId,
+        'purchaseToken': purchaseToken,
+      }),
+    );
+    if (response.statusCode != 200) {
+      throw Exception('Google Play purchase could not be verified yet.');
+    }
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    if (data['verified'] != true ||
+        data['entitlement'] is! Map<String, dynamic>) {
+      throw Exception('Google Play purchase was not confirmed by the server.');
+    }
+    return data['entitlement'] as Map<String, dynamic>;
+  }
+
+  static Future<void> checkGooglePlaySubscriptionEligibility(
+    String productId,
+  ) async {
+    final token = accessToken;
+    if (token == null) throw Exception('Sign in before choosing a plan.');
+    final response = await http.post(
+      Uri.parse('$apiBaseUrl/google-play/eligibility'),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $token',
+      },
+      body: jsonEncode({'productId': productId}),
+    );
+    if (response.statusCode != 200) {
+      throw Exception(
+        'Your current paid access must expire before another Google Play subscription can start.',
+      );
+    }
+  }
+
+  static String obfuscatedPlayAccountId(String userId) =>
+      sha256.convert(utf8.encode(userId)).toString();
 
   static Future<Map<String, dynamic>> getEntitlement() async {
     final token = accessToken;
@@ -1076,8 +1169,7 @@ class PasswordRecoveryScreen extends StatefulWidget {
   const PasswordRecoveryScreen({super.key});
 
   @override
-  State<PasswordRecoveryScreen> createState() =>
-      _PasswordRecoveryScreenState();
+  State<PasswordRecoveryScreen> createState() => _PasswordRecoveryScreenState();
 }
 
 class _PasswordRecoveryScreenState extends State<PasswordRecoveryScreen> {
@@ -1113,7 +1205,8 @@ class _PasswordRecoveryScreenState extends State<PasswordRecoveryScreen> {
     } on AuthException catch (error) {
       if (mounted) setState(() => message = error.message);
     } catch (error) {
-      if (mounted) setState(() => message = 'Could not update password: $error');
+      if (mounted)
+        setState(() => message = 'Could not update password: $error');
     } finally {
       if (mounted) setState(() => loading = false);
     }
@@ -1167,7 +1260,8 @@ class _PasswordRecoveryScreenState extends State<PasswordRecoveryScreen> {
                   GoldButton(
                     label: loading
                         ? AppLanguage.t('Please wait…', 'يرجى الانتظار…')
-                        : AppLanguage.t('Save new password', 'احفظ كلمة المرور'),
+                        : AppLanguage.t(
+                            'Save new password', 'احفظ كلمة المرور'),
                     icon: Icons.lock_reset_rounded,
                     onPressed: loading ? () {} : updatePassword,
                   ),
@@ -2564,8 +2658,7 @@ class _RecitationCheckScreenState extends State<RecitationCheckScreen> {
             if (comparison != null)
               _resultCard(
                 'Estimated word similarity',
-                '${comparison['estimatedSimilarityPercent']}% '
-                    +
+                '${comparison['estimatedSimilarityPercent']}% ' +
                     (allowanceSource == 'daily_pack'
                         ? 'Additional check from a 24-hour pack'
                         : '(${result!['checksUsed']} of ${result!['checksLimit']} checks used)'),
@@ -3019,9 +3112,19 @@ class _ProgressScreenState extends State<ProgressScreen> {
   Future<List<Map<String, dynamic>>>? progressFuture;
   bool checkoutStatusLoaded = false;
   bool serverCheckoutEnabled = false;
+  bool serverGooglePlayEnabled = false;
   bool recitationServiceEnabled = false;
   String? checkoutStatusError;
   bool startingCheckout = false;
+  bool googlePlayStoreAvailable = false;
+  bool googlePlayProductsLoaded = false;
+  StreamSubscription<List<PurchaseDetails>>? purchaseSubscription;
+  final Map<String, ProductDetails> googlePlayProducts = {};
+  final Map<String, PurchaseDetails> pendingGooglePlayPurchases = {};
+  final Set<String> processingGooglePlayTokens = {};
+
+  bool get isAndroidBilling =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
   @override
   void initState() {
@@ -3032,6 +3135,8 @@ class _ProgressScreenState extends State<ProgressScreen> {
         setState(() {
           checkoutStatusLoaded = true;
           serverCheckoutEnabled = features['paidCheckoutEnabled'] == true;
+          serverGooglePlayEnabled =
+              features['googlePlayBillingEnabled'] == true;
           recitationServiceEnabled = features['recitationEnabled'] == true;
         });
       }).catchError((Object error) {
@@ -3046,6 +3151,160 @@ class _ProgressScreenState extends State<ProgressScreen> {
       entitlementFuture = PaymentService.getEntitlement();
       progressFuture = PaymentService.getAyahProgress();
     }
+    if (isAndroidBilling && supabaseConfigured) {
+      _loadGooglePlayBilling();
+    }
+  }
+
+  Future<void> _loadGooglePlayBilling() async {
+    purchaseSubscription = InAppPurchase.instance.purchaseStream.listen(
+      (purchases) => unawaited(_handleGooglePlayPurchases(purchases)),
+      onError: (Object error) {
+        if (mounted)
+          setState(() => checkoutStatusError = 'Purchase updates unavailable.');
+      },
+    );
+    try {
+      final available = await InAppPurchase.instance.isAvailable();
+      if (!available) {
+        if (mounted) setState(() => googlePlayProductsLoaded = true);
+        return;
+      }
+      final response = await InAppPurchase.instance.queryProductDetails(
+        PaymentService.googlePlayProductIds,
+      );
+      final products = <String, ProductDetails>{};
+      for (final product in response.productDetails) {
+        if (product.id.startsWith('monthly_')) {
+          if (product is GooglePlayProductDetails &&
+              product.offerToken != null) {
+            products.putIfAbsent(product.id, () => product);
+          }
+        } else {
+          products.putIfAbsent(product.id, () => product);
+        }
+      }
+      if (mounted) {
+        setState(() {
+          googlePlayStoreAvailable = true;
+          googlePlayProducts
+            ..clear()
+            ..addAll(products);
+          googlePlayProductsLoaded = true;
+        });
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          googlePlayProductsLoaded = true;
+          checkoutStatusError = 'Google Play products could not be loaded.';
+        });
+      }
+    }
+  }
+
+  Future<void> _handleGooglePlayPurchases(
+    List<PurchaseDetails> purchases,
+  ) async {
+    for (final purchase in purchases) {
+      final purchaseToken = purchase.verificationData.serverVerificationData;
+      if (purchase.status == PurchaseStatus.pending) {
+        if (mounted) setState(() => startingCheckout = true);
+        continue;
+      }
+      if (purchase.status == PurchaseStatus.error ||
+          purchase.status == PurchaseStatus.canceled) {
+        if (mounted) {
+          setState(() => startingCheckout = false);
+          if (purchase.status == PurchaseStatus.error) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                  content: Text('Google Play purchase did not complete.')),
+            );
+          }
+        }
+        continue;
+      }
+      if ((purchase.status != PurchaseStatus.purchased &&
+              purchase.status != PurchaseStatus.restored) ||
+          purchaseToken.isEmpty) {
+        continue;
+      }
+
+      final tokenHash = sha256.convert(utf8.encode(purchaseToken)).toString();
+      final purchaseKey = '${purchase.productID}:$tokenHash';
+      pendingGooglePlayPurchases[purchaseKey] = purchase;
+      if (!processingGooglePlayTokens.add(tokenHash)) continue;
+      try {
+        final entitlement = await PaymentService.verifyGooglePlayPurchase(
+          productId: purchase.productID,
+          purchaseToken: purchaseToken,
+        );
+        // The server acknowledges subscriptions and consumes packs after
+        // entitlement activation; a second client acknowledgement can fail.
+        pendingGooglePlayPurchases.remove(purchaseKey);
+        if (mounted) {
+          setState(() {
+            entitlementFuture = Future.value(entitlement);
+            startingCheckout = false;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Google Play purchase verified.')),
+          );
+        }
+      } catch (error) {
+        if (mounted) {
+          setState(() => startingCheckout = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Purchase verification is pending. Keep the app open or retry it from this screen.',
+              ),
+            ),
+          );
+        }
+      } finally {
+        processingGooglePlayTokens.remove(tokenHash);
+      }
+    }
+  }
+
+  Future<void> _retryGooglePlayPurchases() async {
+    if (pendingGooglePlayPurchases.isEmpty) return;
+    await _handleGooglePlayPurchases(
+      pendingGooglePlayPurchases.values.toList(),
+    );
+  }
+
+  Future<void> _restoreGooglePlayPurchases() async {
+    final userId = Supabase.instance.client.auth.currentUser?.id;
+    if (userId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Sign in before restoring purchases.')),
+      );
+      return;
+    }
+    setState(() => startingCheckout = true);
+    try {
+      await InAppPurchase.instance.restorePurchases(
+        applicationUserName: PaymentService.obfuscatedPlayAccountId(userId),
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('Google Play purchases could not be restored.')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => startingCheckout = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    unawaited(purchaseSubscription?.cancel());
+    super.dispose();
   }
 
   @override
@@ -3077,10 +3336,14 @@ class _ProgressScreenState extends State<ProgressScreen> {
             Text(
               AppLanguage.t(
                 checkoutAvailable
-                    ? 'Paid plans last one month. Payments are one-time and must be renewed manually; they do not renew automatically.'
+                    ? isAndroidBilling
+                        ? 'Google Play subscriptions renew automatically each month until canceled in Google Play.'
+                        : 'Paid plans last one month. Payments are one-time and must be renewed manually; they do not renew automatically.'
                     : 'Paid study features are implemented, but purchases stay unavailable until the payment service is enabled and verified.',
                 checkoutAvailable
-                    ? 'تستمر الخطط المدفوعة شهراً واحداً. الدفع لمرة واحدة ويجب التجديد يدوياً؛ لا يوجد تجديد تلقائي.'
+                    ? isAndroidBilling
+                        ? 'تتجدد اشتراكات Google Play تلقائياً كل شهر حتى إلغائها من Google Play.'
+                        : 'تستمر الخطط المدفوعة شهراً واحداً. الدفع لمرة واحدة ويجب التجديد يدوياً؛ لا يوجد تجديد تلقائي.'
                     : 'ميزات الدراسة المدفوعة مفعّلة برمجياً، لكن الشراء غير متاح حتى تفعيل خدمة الدفع والتحقق منها.',
               ),
               textAlign: TextAlign.center,
@@ -3093,6 +3356,30 @@ class _ProgressScreenState extends State<ProgressScreen> {
                 textAlign: TextAlign.center,
                 style: const TextStyle(color: C.goldLight),
               ),
+            ],
+            if (isAndroidBilling &&
+                serverGooglePlayEnabled &&
+                googlePlayStoreAvailable) ...[
+              TextButton(
+                onPressed:
+                    startingCheckout ? null : _restoreGooglePlayPurchases,
+                child: const Text('Restore Google Play subscriptions'),
+              ),
+              TextButton(
+                onPressed: () => launchUrl(
+                  Uri.parse(
+                    'https://play.google.com/store/account/subscriptions?package=com.hifzai.quran',
+                  ),
+                  mode: LaunchMode.externalApplication,
+                ),
+                child: const Text('Manage or cancel in Google Play'),
+              ),
+              if (pendingGooglePlayPurchases.isNotEmpty)
+                TextButton(
+                  onPressed:
+                      startingCheckout ? null : _retryGooglePlayPurchases,
+                  child: const Text('Retry purchase verification'),
+                ),
             ],
             if (checkoutStatusLoaded && !recitationServiceEnabled) ...[
               const SizedBox(height: 6),
@@ -3190,20 +3477,24 @@ class _ProgressScreenState extends State<ProgressScreen> {
                       ],
                       choices: checkoutAvailable
                           ? [
-                              MapEntry(
-                                AppLanguage.t(
-                                  'R39,99 • 50 checks • 24 hours',
-                                  'R39,99 • ٥٠ فحصاً • ٢٤ ساعة',
+                              if (!isAndroidBilling ||
+                                  googlePlayProducts.containsKey('daily_50'))
+                                MapEntry(
+                                  AppLanguage.t(
+                                    '${googlePlayProducts['daily_50']?.price ?? 'R39,99'} • 50 checks • 24 hours',
+                                    '${googlePlayProducts['daily_50']?.price ?? 'R39,99'} • ٥٠ فحصاً • ٢٤ ساعة',
+                                  ),
+                                  'daily_50',
                                 ),
-                                'daily_50',
-                              ),
-                              MapEntry(
-                                AppLanguage.t(
-                                  'R89,99 • 100 checks • 24 hours',
-                                  'R89,99 • ١٠٠ فحص • ٢٤ ساعة',
+                              if (!isAndroidBilling ||
+                                  googlePlayProducts.containsKey('daily_100'))
+                                MapEntry(
+                                  AppLanguage.t(
+                                    '${googlePlayProducts['daily_100']?.price ?? 'R89,99'} • 100 checks • 24 hours',
+                                    '${googlePlayProducts['daily_100']?.price ?? 'R89,99'} • ١٠٠ فحص • ٢٤ ساعة',
+                                  ),
+                                  'daily_100',
                                 ),
-                                'daily_100',
-                              ),
                             ]
                           : const [],
                       onChoose: _startCheckout,
@@ -3225,8 +3516,15 @@ class _ProgressScreenState extends State<ProgressScreen> {
         ),
       );
 
-  bool get checkoutAvailable =>
-      paidCheckoutEnabled && checkoutStatusLoaded && serverCheckoutEnabled;
+  bool get checkoutAvailable => isAndroidBilling
+      ? checkoutStatusLoaded &&
+          serverGooglePlayEnabled &&
+          googlePlayStoreAvailable &&
+          googlePlayProductsLoaded
+      : kIsWeb &&
+          paidCheckoutEnabled &&
+          checkoutStatusLoaded &&
+          serverCheckoutEnabled;
 
   Widget _monthlyPlanCard({
     required String title,
@@ -3237,10 +3535,14 @@ class _ProgressScreenState extends State<ProgressScreen> {
   }) =>
       _planCard(
         title: title,
-        price: price,
+        price: googlePlayProducts[productId]?.price ?? price,
         period: AppLanguage.t(
-          'per month • manual one-time renewal',
-          'شهرياً • تجديد يدوي بدفعة واحدة',
+          isAndroidBilling
+              ? 'per month • auto-renews • cancel in Google Play'
+              : 'per month • manual one-time renewal',
+          isAndroidBilling
+              ? 'شهرياً • يتجدد تلقائياً • الإلغاء من Google Play'
+              : 'شهرياً • تجديد يدوي بدفعة واحدة',
         ),
         status: paidPlanStatus,
         badge: highlighted ? AppLanguage.t('Recommended', 'موصى به') : null,
@@ -3258,8 +3560,12 @@ class _ProgressScreenState extends State<ProgressScreen> {
             'تقرير الدقة لكل سورة وجلسات مراجعة مخصصة',
           ),
           AppLanguage.t(
-            'Unused monthly checks do not roll over; renew manually with another one-time payment',
-            'لا تنتقل الفحوص الشهرية غير المستخدمة؛ جدد يدوياً بدفعة واحدة جديدة',
+            isAndroidBilling
+                ? 'Unused monthly checks do not roll over; manage or cancel renewal in Google Play'
+                : 'Unused monthly checks do not roll over; renew manually with another one-time payment',
+            isAndroidBilling
+                ? 'لا تنتقل الفحوص الشهرية غير المستخدمة؛ أدر التجديد أو ألغِه من Google Play'
+                : 'لا تنتقل الفحوص الشهرية غير المستخدمة؛ جدد يدوياً بدفعة واحدة جديدة',
           ),
           AppLanguage.t(
             'Transcript comparison is an estimate, not Tajweed grading',
@@ -3267,12 +3573,13 @@ class _ProgressScreenState extends State<ProgressScreen> {
           ),
         ],
         highlighted: highlighted,
-        choices: checkoutAvailable
+        choices: checkoutAvailable &&
+                (!isAndroidBilling || googlePlayProducts.containsKey(productId))
             ? [
                 MapEntry(
                   AppLanguage.t(
-                    '$price • $monthlyChecks checks/month',
-                    '$price • $monthlyChecks فحصاً/شهرياً',
+                    '${googlePlayProducts[productId]?.price ?? price} • $monthlyChecks checks/month',
+                    '${googlePlayProducts[productId]?.price ?? price} • $monthlyChecks فحصاً/شهرياً',
                   ),
                   productId,
                 ),
@@ -3285,8 +3592,12 @@ class _ProgressScreenState extends State<ProgressScreen> {
   String get paidPlanStatus {
     if (checkoutAvailable) {
       return AppLanguage.t(
-        'Available • one-month access, manual renewal',
-        'متاح • وصول لشهر واحد، وتجديد يدوي',
+        isAndroidBilling
+            ? 'Available • monthly auto-renewing Google Play subscription'
+            : 'Available • one-month access, manual renewal',
+        isAndroidBilling
+            ? 'متاح • اشتراك Google Play شهري متجدد تلقائياً'
+            : 'متاح • وصول لشهر واحد، وتجديد يدوي',
       );
     }
     if (checkoutStatusError != null) {
@@ -3295,7 +3606,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
         'تعذر التحقق من حالة الخدمة',
       );
     }
-    if (paidCheckoutEnabled && !checkoutStatusLoaded) {
+    if ((paidCheckoutEnabled || isAndroidBilling) && !checkoutStatusLoaded) {
       return AppLanguage.t(
         'Checking service availability…',
         'جارٍ التحقق من توفر الخدمة…',
@@ -3316,7 +3627,16 @@ class _ProgressScreenState extends State<ProgressScreen> {
     if (startingCheckout || !checkoutAvailable) return;
     setState(() => startingCheckout = true);
     try {
-      await PaymentService.launchCheckout(plan);
+      if (isAndroidBilling) {
+        final product = googlePlayProducts[plan];
+        if (product == null) {
+          throw Exception('This Google Play product is not available.');
+        }
+        await PaymentService.checkGooglePlaySubscriptionEligibility(plan);
+        await PaymentService.launchGooglePlayPurchase(plan, product);
+      } else {
+        await PaymentService.launchCheckout(plan);
+      }
     } catch (checkoutError) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -3546,6 +3866,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
           final dailyPackExpiry = dailyPackExpiresAt == null
               ? null
               : DateTime.tryParse(dailyPackExpiresAt);
+          final googlePlayAutoRenewing = data?['googlePlayAutoRenewing'];
           final accessMessage = snapshot.hasError
               ? 'Could not load saved plan: ${snapshot.error}'
               : snapshot.connectionState != ConnectionState.done
@@ -3556,11 +3877,17 @@ class _ProgressScreenState extends State<ProgressScreen> {
                           '${recitationLimit ?? 'your'} monthly checks used. '
                           'Access is saved until '
                           '${expiry?.toLocal().toString().split(' ').first ?? 'the expiry date'}.';
+          final googlePlayMessage = plan != 'free' &&
+                  googlePlayAutoRenewing is bool
+              ? googlePlayAutoRenewing
+                  ? ' Google Play renewal is active.'
+                  : ' Google Play renewal is canceled; access remains until the expiry date.'
+              : '';
           final packMessage = dailyPackRemaining == 0
               ? ''
               : ' You also have $dailyPackRemaining extra checks; the earliest pack expires '
                   '${dailyPackExpiry?.toLocal().toString() ?? 'soon'}.';
-          final message = '$accessMessage$packMessage';
+          final message = '$accessMessage$googlePlayMessage$packMessage';
           return Container(
             padding: const EdgeInsets.all(14),
             decoration: BoxDecoration(

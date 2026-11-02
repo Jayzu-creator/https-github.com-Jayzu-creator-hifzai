@@ -158,6 +158,24 @@ void main() {
     expect(notYetSaved.confirms(19900), isFalse);
   });
 
+  test('Google Play billing uses fixed product IDs and a hashed account ID',
+      () {
+    expect(
+      PaymentService.googlePlayProductIds,
+      {
+        'monthly_400',
+        'monthly_700',
+        'monthly_1000',
+        'daily_50',
+        'daily_100',
+      },
+    );
+    final obfuscatedId = PaymentService.obfuscatedPlayAccountId('user-123');
+    expect(obfuscatedId, hasLength(64));
+    expect(obfuscatedId, matches(RegExp(r'^[a-f0-9]{64}$')));
+    expect(obfuscatedId, isNot('user-123'));
+  });
+
   testWidgets('renders the HifzAI app', (tester) async {
     await tester.pumpWidget(const HifzAIApp());
     expect(find.byType(HifzAIApp), findsOneWidget);
@@ -201,13 +219,14 @@ void main() {
     );
     expect(find.text('HifzAI 400'), findsOneWidget);
     expect(
-      find.text('R199,00 • per month • manual one-time renewal'),
+      find.text('R199,00 • per month • auto-renews • cancel in Google Play'),
       findsOneWidget,
     );
-    expect(find.textContaining('400 estimated recitation checks'), findsOneWidget);
+    expect(
+        find.textContaining('400 estimated recitation checks'), findsOneWidget);
     expect(find.text('Recommended'), findsOneWidget);
     expect(
-      find.text('Study tools ready • live services disabled'),
+      find.text('Checking service availability…'),
       findsWidgets,
     );
     expect(
@@ -227,17 +246,19 @@ void main() {
       findsOneWidget,
     );
     expect(
-      find.text('R299,00 • per month • manual one-time renewal'),
+      find.text('R299,00 • per month • auto-renews • cancel in Google Play'),
       findsOneWidget,
     );
-    expect(find.textContaining('700 estimated recitation checks'), findsOneWidget);
+    expect(
+        find.textContaining('700 estimated recitation checks'), findsOneWidget);
     await tester.scrollUntilVisible(
       find.text('HifzAI 1,000'),
       300,
       scrollable: find.byType(Scrollable).first,
     );
     expect(find.text('HifzAI 1,000'), findsOneWidget);
-    expect(find.textContaining('1000 estimated recitation checks'), findsOneWidget);
+    expect(find.textContaining('1000 estimated recitation checks'),
+        findsOneWidget);
     expect(find.text('Extra recitation packs'), findsNothing);
     expect(find.textContaining('Planned:'), findsNothing);
     expect(find.text('Choose'), findsNothing);
